@@ -1,0 +1,5 @@
+aiogram==3.4.1
+pillow==10.2.0
+reportlab==4.0.9
+gspread==5.12.4
+oauth2client==4.1.3

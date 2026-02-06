@@ -7,14 +7,18 @@ Telegram бот "Генератор КП"
 import os
 import logging
 from aiogram import Bot, Dispatcher, types, F
-from aiogram.filters import Command, StateFilter
+from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
+from parser import CarDescriptionParser
 
 # Настройка логирования
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
 # Состояния FSM
@@ -24,16 +28,15 @@ class KPStates(StatesGroup):
     editing_field = State()
     waiting_photos = State()
 
-# Токен бота (будет из переменных окружения)
+# Токен бота
 BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
 
-# Белый список пользователей (опционально)
-ALLOWED_USERS = [
-    # Добавь сюда telegram user_id сотрудников
-    # 123456789,
-    # 987654321,
-]
+# Белый список (раскомментируй и добавь user_id для ограничения доступа)
+ALLOWED_USERS = []
+# Пример:
+# ALLOWED_USERS = [123456789, 987654321]
 
+# Инициализация
 bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
@@ -43,17 +46,16 @@ dp = Dispatcher(storage=storage)
 
 def get_main_menu():
     """Главное меню"""
-    kb = [
+    keyboard = [
         [KeyboardButton(text="📝 Создать КП")],
-        [KeyboardButton(text="📋 Мои черновики")],
         [KeyboardButton(text="ℹ️ Помощь")],
     ]
-    return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
+    return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
 
 
 def get_edit_card_kb():
-    """Кнопки для редактирования карточки"""
-    kb = [
+    """Кнопки редактирования карточки"""
+    keyboard = [
         [
             InlineKeyboardButton(text="✏️ Название", callback_data="edit_title"),
             InlineKeyboardButton(text="📅 Год", callback_data="edit_year"),
@@ -83,84 +85,30 @@ def get_edit_card_kb():
             InlineKeyboardButton(text="❌ Отмена", callback_data="cancel"),
         ],
     ]
-    return InlineKeyboardMarkup(inline_keyboard=kb)
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 
-def get_photos_kb():
-    """Кнопки для загрузки фото"""
-    kb = [
-        [InlineKeyboardButton(text="✅ Готово (фото загружены)", callback_data="photos_done")],
+def get_photos_kb(photos_count: int):
+    """Кнопки загрузки фото"""
+    keyboard = []
+    
+    if photos_count >= 3:
+        keyboard.append([
+            InlineKeyboardButton(text="✅ Готово (создать PDF)", callback_data="photos_done")
+        ])
+    
+    keyboard.extend([
         [InlineKeyboardButton(text="🔄 Сбросить фото", callback_data="reset_photos")],
         [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel")],
-    ]
-    return InlineKeyboardMarkup(inline_keyboard=kb)
-
-
-# ==================== ХЕНДЛЕРЫ ====================
-
-@dp.message(Command("start"))
-async def cmd_start(message: types.Message):
-    """Команда /start"""
-    user_id = message.from_user.id
+    ])
     
-    # Проверка whitelist (опционально)
-    # if ALLOWED_USERS and user_id not in ALLOWED_USERS:
-    #     await message.answer("⛔️ У вас нет доступа к этому боту.")
-    #     return
-    
-    await message.answer(
-        f"Привет, {message.from_user.first_name}! 👋\n\n"
-        "Я помогу тебе создать коммерческое предложение (КП) для автомобиля.\n\n"
-        "Выбери действие:",
-        reply_markup=get_main_menu()
-    )
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 
-@dp.message(F.text == "📝 Создать КП")
-async def start_create_kp(message: types.Message, state: FSMContext):
-    """Начало создания КП"""
-    await message.answer(
-        "📋 Отлично! Давай создадим КП.\n\n"
-        "**Шаг 1 из 2:** Отправь мне описание автомобиля.\n\n"
-        "Можешь вставить полное описание (спецификацию) из Авито или другого сайта - "
-        "я автоматически извлеку все нужные данные.\n\n"
-        "После этого ты сможешь проверить и отредактировать каждое поле.",
-        parse_mode="Markdown"
-    )
-    await state.set_state(KPStates.waiting_description)
-
-
-@dp.message(KPStates.waiting_description, F.text)
-async def process_description(message: types.Message, state: FSMContext):
-    """Обработка описания автомобиля"""
-    # Импортируем парсер
-    from parser import CarDescriptionParser
-    
-    # Парсим описание
-    parser = CarDescriptionParser()
-    description_text = message.text
-    parsed_data = parser.parse(description_text)
-    
-    # Сохраняем в состояние
-    await state.update_data(
-        description_text=description_text,
-        car_data=parsed_data,
-        photos=[]
-    )
-    
-    # Формируем карточку для показа
-    card_text = format_car_card(parsed_data)
-    
-    await message.answer(
-        "✅ Описание обработано!\n\n" + card_text,
-        reply_markup=get_edit_card_kb(),
-        parse_mode="Markdown"
-    )
-    await state.set_state(KPStates.editing_card)
-
+# ==================== ФОРМАТИРОВАНИЕ ====================
 
 def format_car_card(data: dict) -> str:
-    """Форматирует карточку автомобиля для показа"""
+    """Форматирует карточку автомобиля"""
     lines = ["📋 **Карточка автомобиля:**\n"]
     
     lines.append(f"📝 **Название:** {data.get('title') or '❓ Не указано'}")
@@ -169,8 +117,19 @@ def format_car_card(data: dict) -> str:
     lines.append(f"⚙️ **Двигатель:** {data.get('engine_short') or '❓ Не указан'}")
     lines.append(f"🔧 **Коробка:** {data.get('gearbox') or '❓ Не указана'}")
     lines.append(f"🎨 **Цвет:** {data.get('color') or '❓ Нужно указать'}")
-    lines.append(f"📊 **Пробег:** {data.get('mileage_km') or '❓ Нужно указать'} км")
-    lines.append(f"💰 **Цена:** {data.get('price_rub') or '❓ Нужно указать'} руб")
+    
+    mileage = data.get('mileage_km')
+    if mileage:
+        lines.append(f"📊 **Пробег:** {mileage:,} км".replace(',', ' '))
+    else:
+        lines.append(f"📊 **Пробег:** ❓ Нужно указать")
+    
+    price = data.get('price_rub')
+    if price:
+        lines.append(f"💰 **Цена:** {price:,} руб".replace(',', ' '))
+    else:
+        lines.append(f"💰 **Цена:** ❓ Нужно указать")
+    
     lines.append(f"📝 **Примечание к цене:** {data.get('price_note', 'с НДС')}")
     
     spec_items = data.get('spec_items', [])
@@ -186,24 +145,109 @@ def format_car_card(data: dict) -> str:
     return "\n".join(lines)
 
 
+def escape_markdown(text: str) -> str:
+    """Экранирует спецсимволы для Markdown"""
+    special_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
+    for char in special_chars:
+        text = text.replace(char, f'\\{char}')
+    return text
+
+
+# ==================== ХЕНДЛЕРЫ ====================
+
+@dp.message(Command("start"))
+async def cmd_start(message: types.Message, state: FSMContext):
+    """Команда /start"""
+    user_id = message.from_user.id
+    
+    # Проверка whitelist
+    if ALLOWED_USERS and user_id not in ALLOWED_USERS:
+        await message.answer("⛔️ У вас нет доступа к этому боту.")
+        logger.warning(f"Unauthorized access attempt from user {user_id}")
+        return
+    
+    await state.clear()
+    
+    await message.answer(
+        f"Привет, {message.from_user.first_name}! 👋\n\n"
+        "Я помогу создать коммерческое предложение (КП) для автомобиля.\n\n"
+        "Выбери действие:",
+        reply_markup=get_main_menu()
+    )
+    logger.info(f"User {user_id} started bot")
+
+
+@dp.message(F.text == "📝 Создать КП")
+async def start_create_kp(message: types.Message, state: FSMContext):
+    """Начало создания КП"""
+    await state.clear()
+    
+    await message.answer(
+        "📋 Отлично! Давай создадим КП.\n\n"
+        "**Шаг 1 из 2:** Отправь мне описание автомобиля.\n\n"
+        "Можешь вставить полное описание (спецификацию) из Авито или другого сайта — "
+        "я автоматически извлеку все нужные данные.\n\n"
+        "После этого ты сможешь проверить и отредактировать каждое поле.",
+        parse_mode="Markdown"
+    )
+    await state.set_state(KPStates.waiting_description)
+    logger.info(f"User {message.from_user.id} started creating KP")
+
+
+@dp.message(KPStates.waiting_description, F.text)
+async def process_description(message: types.Message, state: FSMContext):
+    """Обработка описания"""
+    try:
+        # Парсим описание
+        parser = CarDescriptionParser()
+        description_text = message.text
+        parsed_data = parser.parse(description_text)
+        
+        # Сохраняем в состояние
+        await state.update_data(
+            description_text=description_text,
+            car_data=parsed_data,
+            photos=[]
+        )
+        
+        # Формируем карточку
+        card_text = format_car_card(parsed_data)
+        
+        await message.answer(
+            "✅ Описание обработано!\n\n" + card_text,
+            reply_markup=get_edit_card_kb(),
+            parse_mode="Markdown"
+        )
+        await state.set_state(KPStates.editing_card)
+        logger.info(f"User {message.from_user.id} parsed description successfully")
+        
+    except Exception as e:
+        logger.error(f"Error parsing description: {e}")
+        await message.answer(
+            "❌ Ошибка при обработке описания. Попробуй ещё раз.",
+            reply_markup=get_main_menu()
+        )
+        await state.clear()
+
+
 @dp.callback_query(F.data.startswith("edit_"))
 async def handle_edit_field(callback: types.CallbackQuery, state: FSMContext):
-    """Обработка кнопок редактирования полей"""
+    """Обработка редактирования полей"""
     field_name = callback.data.replace("edit_", "")
     
-    field_prompts = {
-        "title": "Введите название автомобиля:",
-        "year": "Введите год выпуска (например: 2024):",
-        "drive": "Введите привод (Полный/Передний/Задний):",
-        "engine": "Введите описание двигателя (например: 258 л.с., 2.0, Бензин):",
-        "gearbox": "Введите коробку передач (Автомат/Механика/Робот/Вариатор):",
-        "color": "Введите цвет автомобиля:",
-        "mileage": "Введите пробег в км (только число):",
-        "price": "Введите цену в рублях (только число):",
-        "spec": "Отправьте список пунктов спецификации (каждый пункт с новой строки):",
+    prompts = {
+        "title": "Введи название автомобиля:",
+        "year": "Введи год выпуска (например: 2024):",
+        "drive": "Введи привод (Полный/Передний/Задний):",
+        "engine": "Введи описание двигателя (например: 258 л.с., 2.0, Бензин):",
+        "gearbox": "Введи коробку передач (Автомат/Механика/Робот/Вариатор):",
+        "color": "Введи цвет автомобиля:",
+        "mileage": "Введи пробег в км (только число):",
+        "price": "Введи цену в рублях (только число):",
+        "spec": "Отправь список пунктов спецификации (каждый пункт с новой строки):",
     }
     
-    await callback.message.answer(field_prompts.get(field_name, "Введите значение:"))
+    await callback.message.answer(prompts.get(field_name, "Введи значение:"))
     await state.update_data(editing_field=field_name)
     await state.set_state(KPStates.editing_field)
     await callback.answer()
@@ -212,50 +256,56 @@ async def handle_edit_field(callback: types.CallbackQuery, state: FSMContext):
 @dp.message(KPStates.editing_field, F.text)
 async def save_edited_field(message: types.Message, state: FSMContext):
     """Сохранение отредактированного поля"""
-    data = await state.get_data()
-    field_name = data.get("editing_field")
-    car_data = data.get("car_data", {})
-    
-    # Маппинг полей
-    field_mapping = {
-        "title": "title",
-        "year": "year",
-        "drive": "drive",
-        "engine": "engine_short",
-        "gearbox": "gearbox",
-        "color": "color",
-        "mileage": "mileage_km",
-        "price": "price_rub",
-        "spec": "spec_items",
-    }
-    
-    actual_field = field_mapping.get(field_name)
-    
-    if actual_field:
-        # Обработка числовых полей
-        if field_name in ["year", "mileage", "price"]:
-            try:
-                value = int(message.text.replace(" ", "").replace(",", ""))
-                car_data[actual_field] = value
-            except ValueError:
-                await message.answer("⚠️ Пожалуйста, введите число")
-                return
-        elif field_name == "spec":
-            # Спецификация - список строк
-            car_data[actual_field] = [line.strip() for line in message.text.split("\n") if line.strip()]
-        else:
-            car_data[actual_field] = message.text.strip()
+    try:
+        data = await state.get_data()
+        field_name = data.get("editing_field")
+        car_data = data.get("car_data", {})
         
-        await state.update_data(car_data=car_data)
+        field_mapping = {
+            "title": "title",
+            "year": "year",
+            "drive": "drive",
+            "engine": "engine_short",
+            "gearbox": "gearbox",
+            "color": "color",
+            "mileage": "mileage_km",
+            "price": "price_rub",
+            "spec": "spec_items",
+        }
         
-        # Показываем обновлённую карточку
-        card_text = format_car_card(car_data)
-        await message.answer(
-            "✅ Сохранено!\n\n" + card_text,
-            reply_markup=get_edit_card_kb(),
-            parse_mode="Markdown"
-        )
-        await state.set_state(KPStates.editing_card)
+        actual_field = field_mapping.get(field_name)
+        
+        if actual_field:
+            # Числовые поля
+            if field_name in ["year", "mileage", "price"]:
+                try:
+                    value = int(message.text.replace(" ", "").replace(",", ""))
+                    car_data[actual_field] = value
+                except ValueError:
+                    await message.answer("⚠️ Пожалуйста, введи число")
+                    return
+            # Спецификация
+            elif field_name == "spec":
+                car_data[actual_field] = [line.strip() for line in message.text.split("\n") if line.strip()]
+            # Текстовые поля
+            else:
+                car_data[actual_field] = message.text.strip()
+            
+            await state.update_data(car_data=car_data)
+            
+            # Показываем обновлённую карточку
+            card_text = format_car_card(car_data)
+            await message.answer(
+                "✅ Сохранено!\n\n" + card_text,
+                reply_markup=get_edit_card_kb(),
+                parse_mode="Markdown"
+            )
+            await state.set_state(KPStates.editing_card)
+            logger.info(f"User {message.from_user.id} edited field {field_name}")
+    
+    except Exception as e:
+        logger.error(f"Error saving field: {e}")
+        await message.answer("❌ Ошибка при сохранении. Попробуй ещё раз.")
 
 
 @dp.callback_query(F.data == "proceed_photos")
@@ -264,83 +314,99 @@ async def proceed_to_photos(callback: types.CallbackQuery, state: FSMContext):
     await callback.message.answer(
         "📸 **Шаг 2 из 2:** Загрузи 3-4 фото автомобиля.\n\n"
         "Фото можно отправить по одному или альбомом.\n"
-        "После загрузки всех фото нажми кнопку **\"Готово\"**.",
-        reply_markup=get_photos_kb(),
+        "Минимум 3 фото для создания КП.",
         parse_mode="Markdown"
     )
+    
+    data = await state.get_data()
+    photos_count = len(data.get("photos", []))
+    
+    await callback.message.answer(
+        f"📊 Загружено фото: {photos_count}/4",
+        reply_markup=get_photos_kb(photos_count)
+    )
+    
     await state.set_state(KPStates.waiting_photos)
     await callback.answer()
 
 
 @dp.message(KPStates.waiting_photos, F.photo)
 async def handle_photo(message: types.Message, state: FSMContext):
-    """Обработка загруженных фото"""
+    """Обработка фото"""
     data = await state.get_data()
     photos = data.get("photos", [])
     
-    # Сохраняем file_id фото
+    if len(photos) >= 4:
+        await message.answer("⚠️ Максимум 4 фото. Нажми \"Готово\" для создания PDF.")
+        return
+    
+    # Сохраняем file_id
     photo_file_id = message.photo[-1].file_id
     photos.append(photo_file_id)
-    
     await state.update_data(photos=photos)
     
-    if len(photos) >= 4:
-        await message.answer(
-            f"✅ Загружено {len(photos)} фото (максимум 4).\n"
-            "Нажми **\"Готово\"** для создания PDF.",
-            parse_mode="Markdown"
-        )
+    status_text = f"✅ Загружено фото: {len(photos)}/4"
+    
+    if len(photos) >= 3:
+        status_text += "\n\n🎉 Минимум достигнут! Можешь нажать \"Готово\" или загрузить ещё."
     else:
-        await message.answer(
-            f"✅ Загружено {len(photos)} фото.\n"
-            f"Осталось минимум {max(0, 3 - len(photos))} фото.",
-            parse_mode="Markdown"
-        )
+        status_text += f"\n\nОсталось минимум: {3 - len(photos)}"
+    
+    await message.answer(
+        status_text,
+        reply_markup=get_photos_kb(len(photos))
+    )
+    logger.info(f"User {message.from_user.id} uploaded photo {len(photos)}/4")
 
 
 @dp.callback_query(F.data == "photos_done")
 async def finalize_kp(callback: types.CallbackQuery, state: FSMContext):
-    """Финализация и создание PDF"""
+    """Создание PDF"""
     data = await state.get_data()
     photos = data.get("photos", [])
+    car_data = data.get("car_data", {})
     
     if len(photos) < 3:
         await callback.answer("⚠️ Нужно минимум 3 фото!", show_alert=True)
         return
     
-    await callback.message.answer(
-        "⏳ Создаю PDF... Подожди немного.",
-        parse_mode="Markdown"
-    )
+    await callback.message.answer("⏳ Создаю PDF... Подожди немного.")
     
-    # Здесь будет генерация PDF
-    # TODO: Реализовать генерацию PDF
-    
-    await callback.message.answer(
-        "✅ **КП готово!**\n\n"
-        "📄 [Пока заглушка - PDF будет на следующем шаге]",
-        parse_mode="Markdown",
-        reply_markup=get_main_menu()
-    )
-    
-    await state.clear()
-    await callback.answer()
-
-
-@dp.callback_query(F.data == "cancel")
-async def cancel_handler(callback: types.CallbackQuery, state: FSMContext):
-    """Отмена текущего действия"""
-    await state.clear()
-    await callback.message.answer(
-        "❌ Действие отменено.",
-        reply_markup=get_main_menu()
-    )
-    await callback.answer()
+    try:
+        # TODO: Здесь будет генерация PDF
+        # Пока заглушка
+        
+        kp_info = (
+            f"✅ **КП готово!**\n\n"
+            f"📝 {car_data.get('title', 'Автомобиль')}\n"
+            f"📅 {car_data.get('year', '—')}\n"
+            f"💰 {car_data.get('price_rub', '—'):,} руб\n\n".replace(',', ' ')
+        )
+        kp_info += "📄 PDF будет готов на следующем этапе разработки"
+        
+        await callback.message.answer(
+            kp_info,
+            parse_mode="Markdown",
+            reply_markup=get_main_menu()
+        )
+        
+        logger.info(f"User {callback.from_user.id} created KP successfully")
+        await state.clear()
+        await callback.answer("Готово! ✅")
+        
+    except Exception as e:
+        logger.error(f"Error creating PDF: {e}")
+        await callback.message.answer(
+            "❌ Ошибка при создании PDF. Попробуй ещё раз.",
+            reply_markup=get_main_menu()
+        )
+        await state.clear()
+        await callback.answer()
 
 
 @dp.callback_query(F.data == "reset_photos")
 async def reset_photos_handler(callback: types.CallbackQuery, state: FSMContext):
-    """Сброс загруженных фото"""
+    """Сброс фото"""
     await state.update_data(photos=[])
     await callback.message.answer("🔄 Фото сброшены. Загружай заново.")
     await callback.answer()
@@ -349,51 +415,82 @@ async def reset_photos_handler(callback: types.CallbackQuery, state: FSMContext)
 @dp.callback_query(F.data == "reset_description")
 async def reset_description_handler(callback: types.CallbackQuery, state: FSMContext):
     """Повторный ввод описания"""
-    await callback.message.answer(
-        "🔄 Вставь описание заново:",
-        reply_markup=get_main_menu()
-    )
+    await callback.message.answer("🔄 Вставь описание заново:")
     await state.set_state(KPStates.waiting_description)
     await callback.answer()
+
+
+@dp.callback_query(F.data == "cancel")
+async def cancel_handler(callback: types.CallbackQuery, state: FSMContext):
+    """Отмена"""
+    await state.clear()
+    await callback.message.answer(
+        "❌ Действие отменено.",
+        reply_markup=get_main_menu()
+    )
+    await callback.answer()
+    logger.info(f"User {callback.from_user.id} cancelled action")
 
 
 @dp.message(F.text == "ℹ️ Помощь")
 async def help_command(message: types.Message):
     """Справка"""
-    await message.answer(
+    help_text = (
         "📖 **Как создать КП:**\n\n"
         "1️⃣ Нажми **\"Создать КП\"**\n"
         "2️⃣ Вставь описание автомобиля (спецификацию)\n"
         "3️⃣ Проверь и отредактируй данные\n"
         "4️⃣ Загрузи 3-4 фото\n"
         "5️⃣ Получи готовый PDF\n\n"
-        "✨ Бот автоматически распознает:\n"
+        "✨ **Бот автоматически распознает:**\n"
         "• Модель и год\n"
         "• Двигатель и мощность\n"
         "• Привод и коробку\n"
-        "• Технические характеристики",
-        parse_mode="Markdown"
+        "• Технические характеристики\n\n"
+        "❓ Если бот не распознал какие-то данные, "
+        "ты всегда можешь отредактировать любое поле вручную."
     )
+    await message.answer(help_text, parse_mode="Markdown")
 
 
-@dp.message(F.text == "📋 Мои черновики")
-async def drafts_command(message: types.Message):
-    """Черновики (пока заглушка)"""
+@dp.message()
+async def unknown_message(message: types.Message):
+    """Обработка неизвестных сообщений"""
     await message.answer(
-        "📋 Черновики пока не реализованы.\n"
-        "Будет в следующей версии!",
-        parse_mode="Markdown"
+        "🤔 Не понимаю эту команду.\n\n"
+        "Используй кнопки меню для навигации.",
+        reply_markup=get_main_menu()
     )
 
 
 # ==================== ЗАПУСК ====================
 
-async def main():
-    """Запуск бота"""
+async def on_startup():
+    """При запуске бота"""
+    logger.info("=" * 50)
     logger.info("Бот запущен!")
-    await dp.start_polling(bot)
+    logger.info(f"Whitelist enabled: {bool(ALLOWED_USERS)}")
+    if ALLOWED_USERS:
+        logger.info(f"Allowed users: {ALLOWED_USERS}")
+    logger.info("=" * 50)
+
+
+async def on_shutdown():
+    """При остановке бота"""
+    logger.info("Бот остановлен")
+
+
+async def main():
+    """Главная функция"""
+    dp.startup.register(on_startup)
+    dp.shutdown.register(on_shutdown)
+    
+    await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
 
 
 if __name__ == "__main__":
     import asyncio
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Бот остановлен вручную")

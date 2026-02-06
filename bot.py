@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 Telegram бот "Генератор КП"
 Полная версия с правильным flow + защита от длинных копипастов Авито.
++ команда /ocr_test (проверка локального OCR через Tesseract)
 """
 
 import os
@@ -16,6 +18,7 @@ from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMar
 
 from parser import CarDescriptionParser
 from sheets_logger import sheets_logger
+from ocr_service import ocr_image_to_text  # <-- новый модуль OCR
 
 
 # ==================== НАСТРОЙКИ ====================
@@ -212,6 +215,8 @@ async def parse_and_show_card(message: types.Message, state: FSMContext, descrip
         desc_joined="",
         desc_started_at=0.0,
         desc_waiting_second=False,
+        # выключаем OCR тест, если он был включён
+        _ocr_test_mode=False,
     )
 
     card_text = format_car_card(parsed_data, show_price=False)
@@ -224,6 +229,11 @@ async def parse_and_show_card(message: types.Message, state: FSMContext, descrip
     )
     await state.set_state(KPStates.editing_card)
     logger.info(f"User {message.from_user.id} parsed description successfully")
+
+
+def cut_to_one_message(text: str, limit: int = SAFE_OUTPUT_LIMIT) -> str:
+    """Обрезает текст, чтобы точно влезло в одно сообщение."""
+    return clamp_text(text or "", limit)
 
 
 # ==================== HANDLERS ====================
@@ -246,6 +256,44 @@ async def cmd_start(message: types.Message, state: FSMContext):
         reply_markup=get_main_menu()
     )
     logger.info(f"User {user_id} started bot")
+
+
+# ---------- OCR TEST ----------
+@dp.message(Command("ocr_test"))
+async def cmd_ocr_test(message: types.Message, state: FSMContext):
+    """
+    Тест OCR:
+    1) /ocr_test
+    2) пользователь кидает 1 скрин таблицы "Характеристики"
+    3) бот возвращает распознанный текст (обрезанный)
+    """
+    await state.update_data(_ocr_test_mode=True)
+    await message.answer(
+        "Ок! Отправь 1 скрин блока **«Характеристики»** (таблица).\n"
+        "Я распознаю текст и пришлю результат.\n\n"
+        "Чтобы выйти из теста — отправь любую команду или начни создание КП.",
+        parse_mode="Markdown"
+    )
+
+
+# Хендлер фото для OCR-теста. Важно: общий, но с условием по state.
+@dp.message(F.photo)
+async def handle_any_photo_for_ocr_test(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    if not data.get("_ocr_test_mode"):
+        return  # это не OCR тест — пусть фото ловят другие хендлеры (например waiting_photos)
+
+    try:
+        file = await bot.get_file(message.photo[-1].file_id)
+        tmp_path = "/tmp/ocr_test.jpg"
+        await bot.download_file(file.file_path, tmp_path)
+
+        text = ocr_image_to_text(tmp_path)
+        text = cut_to_one_message(text, SAFE_OUTPUT_LIMIT)
+
+        await message.answer("✅ OCR результат:\n\n" + (text or "⚠️ Ничего не распознано"))
+    except Exception as e:
+        await message.answer(f"❌ Ошибка OCR: {e}")
 
 
 @dp.message(F.text == "📝 Создать КП")
@@ -272,6 +320,7 @@ async def start_create_kp(message: types.Message, state: FSMContext):
         desc_joined="",
         desc_started_at=0.0,
         desc_waiting_second=False,
+        _ocr_test_mode=False,
     )
     await state.set_state(KPStates.waiting_description)
     logger.info(f"User {message.from_user.id} started creating KP")
@@ -307,9 +356,7 @@ async def process_description_finalize(message: types.Message, state: FSMContext
         joined = (data.get("desc_joined") or "").strip()
         first = (data.get("desc_first_part") or "").strip()
 
-        description_text = joined or first
-        description_text = (description_text or "").strip()
-
+        description_text = (joined or first or "").strip()
         if not description_text:
             await message.answer("⚠️ Я не вижу текста. Вставь описание с Авито ещё раз.")
             return
@@ -331,8 +378,7 @@ async def process_description(message: types.Message, state: FSMContext):
     - Вторую часть склеиваем, но общий текст режем до SAFE_INPUT_LIMIT
     """
     try:
-        txt = (message.text or "")
-        txt = normalize_space(txt).strip()
+        txt = normalize_space(message.text or "").strip()
 
         data = await state.get_data()
         started_at = float(data.get("desc_started_at") or 0.0)
@@ -385,7 +431,6 @@ async def process_description(message: types.Message, state: FSMContext):
             return
 
         # Если не ждём вторую, но вдруг пришёл ещё кусок (обычно мусор) — игнорим
-        # Чтобы не мешало: подсказываем, что КП уже формируется через кнопки.
         await message.answer("Я уже обработал описание. Проверь карточку и при необходимости отредактируй поля кнопками ниже.")
 
     except Exception as e:
@@ -565,12 +610,11 @@ async def handle_photo(message: types.Message, state: FSMContext):
 
 @dp.callback_query(F.data == "photos_done")
 async def finalize_kp(callback: types.CallbackQuery, state: FSMContext):
-    """Создание PDF"""
     data = await state.get_data()
     photos = data.get("photos", [])
     car_data = data.get("car_data", {})
 
-    # ✅ Имя пользователя (только имя)
+    # Имя пользователя (только имя)
     user_name = (callback.from_user.first_name or "").strip()
     if not user_name:
         user_name = (callback.from_user.username or "Менеджер").strip()
@@ -584,7 +628,6 @@ async def finalize_kp(callback: types.CallbackQuery, state: FSMContext):
     await callback.message.answer("⏳ Создаю PDF... Подожди немного.")
 
     try:
-        # Скачиваем фото
         photo_paths = []
         for i, photo_id in enumerate(photos):
             file = await bot.get_file(photo_id)
@@ -592,11 +635,9 @@ async def finalize_kp(callback: types.CallbackQuery, state: FSMContext):
             await bot.download_file(file.file_path, file_path)
             photo_paths.append(file_path)
 
-        # Генерируем PDF
         from pdf_generator import generate_kp_pdf
         pdf_path = generate_kp_pdf(car_data, photo_paths)
 
-        # Отправляем PDF
         pdf_file = types.FSInputFile(pdf_path)
         await callback.message.answer_document(
             pdf_file,
@@ -604,7 +645,6 @@ async def finalize_kp(callback: types.CallbackQuery, state: FSMContext):
             parse_mode="Markdown"
         )
 
-        # Логируем в Google Sheets
         username = callback.from_user.full_name or callback.from_user.username or "Unknown"
         sheets_logger.log_kp(
             user_id=callback.from_user.id,
@@ -640,6 +680,7 @@ async def reset_description_handler(callback: types.CallbackQuery, state: FSMCon
         desc_joined="",
         desc_started_at=0.0,
         desc_waiting_second=False,
+        _ocr_test_mode=False,
     )
     await callback.message.answer("🔄 Вставь описание заново:")
     await state.set_state(KPStates.waiting_description)
@@ -664,15 +705,9 @@ async def help_command(message: types.Message):
         "4️⃣ Укажи цену\n"
         "5️⃣ Загрузи 3-4 фото\n"
         "6️⃣ Получи готовый PDF\n\n"
-        "✨ **Бот автоматически распознает:**\n"
-        "• Марку и модель\n"
-        "• Год выпуска и пробег\n"
-        "• Двигатель и мощность\n"
-        "• Привод и коробку\n"
-        "• Цвет\n"
-        "• Технические характеристики\n\n"
         "💡 Если Telegram разобьёт вставку на 2 сообщения — пришли вторую часть.\n"
-        "Чтобы завершить ввод — напиши **готово**."
+        "Чтобы завершить ввод — напиши **готово**.\n\n"
+        "🧪 Для проверки OCR: команда /ocr_test"
     )
     await message.answer(help_text, parse_mode="Markdown")
 

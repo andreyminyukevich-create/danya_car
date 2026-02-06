@@ -99,7 +99,7 @@ class CarDescriptionParser:
                 'gearbox': self._safe_extract(self._extract_gearbox, text_lower),
                 'color': self._safe_extract(self._extract_color, text_lower),
                 'mileage_km': self._safe_extract(self._extract_mileage, cleaned_text),
-                'price_rub': self._safe_extract(self._extract_price, text),
+                'price_rub': None,  # НЕ парсим - будем запрашивать
                 'price_note': 'с НДС',
                 'spec_items': self._safe_extract(self._extract_spec_items, cleaned_text, default=[]),
             }
@@ -170,7 +170,7 @@ class CarDescriptionParser:
         """Извлекает название (марка + модель + модификация)"""
         
         # Шаг 1: Находим основное название (формат Авито)
-        # "Toyota Land Cruiser 4.6 AT, 2015"
+        # "Toyota Land Cruiser 4.6 AT, 2015, 182 800 км"
         match = re.search(r'([A-Z][A-Za-z\-]+(?:\s+[A-Z][A-Za-z\-]+)*(?:\s+[A-Z0-9\-]+)*)\s+(\d\.\d+)\s+([A-Z]{2,})(?:,\s*\d{4})?', text)
         if match:
             brand_model = match.group(0).strip()
@@ -319,73 +319,38 @@ class CarDescriptionParser:
         if 'новый' in text_lower or 'новая' in text_lower or 'новое' in text_lower:
             return 0
         
-        # Ищем "Пробег: 182 800 км"
+        # Приоритет 1: "Пробег: 182 800 км"
         match = re.search(r'Пробег:\s*([\d\s]+)\s*км', text, re.IGNORECASE)
         if match:
-            mileage_str = match.group(1).replace(' ', '')
+            mileage_str = match.group(1).replace(' ', '').replace(',', '')
             try:
-                return int(mileage_str)
+                mileage = int(mileage_str)
+                if 0 <= mileage <= 1000000:
+                    return mileage
             except:
                 pass
         
-        # Ищем просто число + км
-        match = re.search(r'(\d[\d\s]*)\s*км', text_lower)
+        # Приоритет 2: В заголовке "Toyota Land Cruiser 4.6 AT, 2015, 182 800 км"
+        # Ищем: запятая, год, запятая, число, км
+        match = re.search(r',\s*\d{4},\s*([\d\s]+)\s*км', text)
         if match:
-            mileage_str = match.group(1).replace(' ', '')
+            mileage_str = match.group(1).replace(' ', '').replace(',', '')
             try:
                 mileage = int(mileage_str)
-                # Если адекватное значение (не путаем с другими числами)
                 if 10 <= mileage <= 1000000:
                     return mileage
             except:
                 pass
         
-        return None
-    
-    def _extract_price(self, text: str) -> Optional[int]:
-        """Извлекает цену"""
-        
-        # Приоритет 1: Цена сразу после названия модели
-        lines = text.split('\n')
-        for i, line in enumerate(lines):
-            # Ищем строку с названием (содержит марку и AT/MT)
-            if re.search(r'[A-Z][a-z]+.*(?:AT|MT|AMT)', line, re.IGNORECASE):
-                # Смотрим следующие 3 строки
-                for j in range(i+1, min(i+4, len(lines))):
-                    next_line = lines[j].strip()
-                    match = re.search(r'([\d\s]+)\s*₽', next_line)
-                    if match:
-                        price_str = match.group(1).replace(' ', '')
-                        try:
-                            price = int(price_str)
-                            if price >= 100000:
-                                return price
-                        except:
-                            pass
-        
-        # Приоритет 2: Ищем все цены с ₽
-        matches = re.findall(r'([\d\s]+)\s*₽', text)
-        if matches:
-            prices = []
-            for match in matches:
-                price_str = match.replace(' ', '')
-                try:
-                    price = int(price_str)
-                    # Фильтруем адекватные цены (от 100k до 500M)
-                    if 100000 <= price <= 500000000:
-                        prices.append(price)
-                except:
-                    pass
-            if prices:
-                return max(prices)
-        
-        # Приоритет 3: Большие числа
-        matches = re.findall(r'\b(\d{7,})\b', text)
-        if matches:
+        # Приоритет 3: Просто первое число + км (но не маленькое)
+        matches = re.findall(r'(\d[\d\s,]*)\s*км', text_lower)
+        for match_str in matches:
+            mileage_str = match_str.replace(' ', '').replace(',', '')
             try:
-                prices = [int(m) for m in matches if 100000 <= int(m) <= 500000000]
-                if prices:
-                    return max(prices)
+                mileage = int(mileage_str)
+                # Адекватный пробег (не путаем с другими числами типа "13 700 км в год")
+                if 100 <= mileage <= 1000000:
+                    return mileage
             except:
                 pass
         

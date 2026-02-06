@@ -309,22 +309,52 @@ class CarDescriptionParser:
         return None
     
     def _extract_price(self, text: str) -> Optional[int]:
-        """Извлекает цену"""
-        # Ищем цену в формате "31 970 000 ₽" или "31970000"
-        match = re.search(r'([\d\s]+)\s*₽', text)
-        if match:
-            price_str = match.group(1).replace(' ', '')
-            try:
-                return int(price_str)
-            except ValueError:
-                pass
+        """Извлекает цену (приоритет: сразу после названия модели)"""
         
-        # Ищем просто большое число (скорее всего цена)
+        # Приоритет 1: Цена сразу после названия модели
+        # "Mercedes-Benz AMG GT 4.0 AT, 2025\n31 970 000 ₽"
+        lines = text.split('\n')
+        for i, line in enumerate(lines):
+            # Ищем строку с названием (содержит марку и AT/MT)
+            if re.search(r'[A-Z][a-z]+.*(?:AT|MT|AMT)', line, re.IGNORECASE):
+                # Смотрим следующие 3 строки
+                for j in range(i+1, min(i+4, len(lines))):
+                    next_line = lines[j].strip()
+                    # Ищем цену в формате "31 970 000 ₽"
+                    match = re.search(r'([\d\s]+)\s*₽', next_line)
+                    if match:
+                        price_str = match.group(1).replace(' ', '')
+                        try:
+                            price = int(price_str)
+                            # Проверяем адекватность (больше 100,000)
+                            if price >= 100000:
+                                return price
+                        except ValueError:
+                            pass
+        
+        # Приоритет 2: Ищем любую цену с рублём
+        matches = re.findall(r'([\d\s]+)\s*₽', text)
+        if matches:
+            prices = []
+            for match in matches:
+                price_str = match.replace(' ', '')
+                try:
+                    price = int(price_str)
+                    # Фильтруем адекватные цены на авто (от 100k до 500M)
+                    if 100000 <= price <= 500000000:
+                        prices.append(price)
+                except ValueError:
+                    pass
+            if prices:
+                # Берём максимальную (обычно это цена авто, а не ОСАГО)
+                return max(prices)
+        
+        # Приоритет 3: Ищем большое число (7+ цифр)
         matches = re.findall(r'\b(\d{7,})\b', text)
         if matches:
-            # Берём самое большое число (обычно это цена)
-            prices = [int(m) for m in matches]
-            return max(prices)
+            prices = [int(m) for m in matches if 100000 <= int(m) <= 500000000]
+            if prices:
+                return max(prices)
         
         return None
     

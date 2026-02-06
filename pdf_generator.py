@@ -1,24 +1,32 @@
 #!/usr/bin/env python3
 """
-PDF генератор КП (премиум-шаблон):
-- Стр.1: шапка (имя пользователя), HERO-блок (1 фото + краткие характеристики), далее доп. фото, далее спецификация 3 колонки
-- Цена фиксировано внизу первой страницы (не налезает на контент, контент сам переносится на след. страницу)
-- Спецификация: нормализация, перенос, 3 колонки без наложений
-- Фото: EXIF-поворот, режим cover (нормально для вертикальных), скругленные углы через PNG alpha
+PDF генератор КП (премиум-шаблон, стабильная верстка без наложений)
+
+Формат как в твоих примерах:
+- Стр.1: верхняя шапка (имя пользователя), заголовок авто, HERO-блок (серый фон: слева краткие характеристики, справа 1 фото),
+         ниже сетка доп. фото, ниже спецификация (3 колонки), внизу плашка цены.
+- Стр.2+ (если много спецификации): продолжение спецификации, футер на каждой странице.
+- Фото: EXIF-поворот, "cover" кадрирование (нормально для вертикальных), скругление углов (PNG alpha).
+- Спецификация: нормализация (если прилетает строка с • / ; / переносами), перенос по ширине, раскладка в 3 колонки без наложений.
 
 Зависимости:
-- reportlab
-- pillow (PIL)
+  pip install reportlab pillow
 
-Использование:
-generate_kp_pdf(car_data, photo_paths, output_path)
+Как использовать:
+  from pdf_generator import generate_kp_pdf
+  pdf_path = generate_kp_pdf(car_data, photo_paths)
+
+Ожидаемые ключи car_data:
+  title, year, drive, engine_short, gearbox, color, mileage_km,
+  price_rub, price_note, spec_items,
+  user_name (имя для шапки), kp_number (необязательно)
 """
 
 import os
 import io
 import urllib.request
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import mm
@@ -69,7 +77,7 @@ class KPPDFGenerator:
         self.footer_y = 12 * mm
 
         # reserved bottoms
-        self.bottom_default = 22 * mm  # footer + safety
+        self.bottom_default = 22 * mm  # футер + безопасный низ
         self.pricebar_height = 16 * mm
         self.pricebar_gap = 6 * mm
         self.bottom_with_price = self.footer_y + self.pricebar_height + self.pricebar_gap + 6 * mm
@@ -90,11 +98,18 @@ class KPPDFGenerator:
             self.font_bold = "Helvetica-Bold"
             print("⚠️ Using Helvetica (no Cyrillic support)")
 
-        # style
+        # palette
         self.c_title = colors.HexColor("#0f172a")
         self.c_accent = colors.HexColor("#2c5aa0")
         self.c_grey_bg = colors.HexColor("#f3f4f6")
         self.c_grey_text = colors.HexColor("#6b7280")
+        self.c_divider = colors.HexColor("#e5e7eb")
+
+        # legal footer text
+        self.legal_text = (
+            "Остальные фото — по запросу. Комплектацию уточняйте у менеджера. "
+            "Предложение действительно в течение 3 дней."
+        )
 
     # -----------------------------
     # Public
@@ -106,46 +121,45 @@ class KPPDFGenerator:
         self.page_num = 1
         self.price_drawn_on_first_page = False
 
-        # compute formatted price once
         price_text, price_note = self._format_price(car_data.get("price_rub"), car_data.get("price_note"))
+        reserve_price = bool(price_text)
 
-        # page 1 header
-        y = self.top_y
+        # Header line (name + kp number/date)
         y = self._draw_top_header(c, car_data)
         y -= 6 * mm
 
-        # Main title (car)
-        y = self._draw_car_title(c, car_data, y)
+        # Car title
+        y = self._draw_car_title(c, car_data, y, reserve_price_on_first_page=reserve_price)
         y -= 4 * mm
 
-        # HERO block: left short specs + right hero photo
         photos = [p for p in (photo_paths or []) if p]
         hero_photo = photos[0] if photos else None
         other_photos = photos[1:] if len(photos) > 1 else []
 
-        y = self._draw_hero_block(c, car_data, hero_photo, y)
+        # Hero block
+        y = self._draw_hero_block(c, car_data, hero_photo, y, reserve_price_on_first_page=reserve_price)
         y -= 7 * mm
 
-        # Additional photos grid (below hero)
-        y = self._draw_photos_grid(c, other_photos, y)
+        # Optional photos grid (below hero)
+        y = self._draw_photos_grid(c, car_data, other_photos, y, reserve_price_on_first_page=reserve_price)
         if other_photos:
             y -= 6 * mm
 
-        # Specification (3 columns). On first page: do not go below price bar area if price exists.
+        # Specification (3 columns), may continue on next pages
         y = self._draw_specification_3col(
             c,
             car_data,
             y,
-            reserve_price_on_first_page=bool(price_text)
+            reserve_price_on_first_page=reserve_price
         )
 
-        # Draw price bar fixed on first page (if price exists)
+        # Price bar fixed at bottom of first page
         if price_text:
             self._draw_price_bar(c, price_text, price_note)
             self.price_drawn_on_first_page = True
 
-        # Footer for last page
-        self._draw_footer(c, car_data)
+        # Footer on last page
+        self._draw_footer(c)
 
         c.save()
         return output_path
@@ -160,11 +174,11 @@ class KPPDFGenerator:
         return self.bottom_default
 
     def _new_page(self, c: canvas.Canvas, car_data: dict):
-        self._draw_footer(c, car_data)
+        self._draw_footer(c)
         c.showPage()
         self.page_num += 1
 
-        # top header repeated on next pages (с тем же именем)
+        # repeat top header on each page
         self._draw_top_header(c, car_data)
 
     def _ensure_space(self, c: canvas.Canvas, car_data: dict, y: float, needed: float, reserve_price_on_first_page: bool) -> float:
@@ -209,7 +223,7 @@ class KPPDFGenerator:
         except Exception:
             return str(mileage_km)
 
-    def _format_price(self, price_rub, price_note) -> (Optional[str], str):
+    def _format_price(self, price_rub, price_note) -> Tuple[Optional[str], str]:
         if price_rub is None or str(price_rub).strip() == "":
             return None, str(price_note or "")
         note = str(price_note or "с НДС").strip()
@@ -243,7 +257,13 @@ class KPPDFGenerator:
     # Image processing (EXIF, cover, rounded)
     # -----------------------------
 
-    def _prepare_image_bytes_cover_rounded(self, path: str, target_w_pt: float, target_h_pt: float, radius_pt: float = 10.0) -> Optional[io.BytesIO]:
+    def _prepare_image_bytes_cover_rounded(
+        self,
+        path: str,
+        target_w_pt: float,
+        target_h_pt: float,
+        radius_pt: float = 10.0
+    ) -> Optional[io.BytesIO]:
         """
         Готовит PNG с альфой:
         - учитывает EXIF ориентацию
@@ -254,8 +274,7 @@ class KPPDFGenerator:
         if not path:
             return None
 
-        # reportlab points ~ 1/72 inch; mm converted already. For PIL we just need pixels.
-        # We'll map 1pt -> 2.5px (достаточно для качества и веса)
+        # 1pt -> ~2.6px (компромисс качество/вес)
         scale = 2.6
         tw = max(1, int(target_w_pt * scale))
         th = max(1, int(target_h_pt * scale))
@@ -263,7 +282,7 @@ class KPPDFGenerator:
 
         try:
             img = Image.open(path)
-            img = ImageOps.exif_transpose(img)  # важное для фото с телефона
+            img = ImageOps.exif_transpose(img)  # фото с телефона
             if img.mode not in ("RGB", "RGBA"):
                 img = img.convert("RGB")
 
@@ -273,12 +292,12 @@ class KPPDFGenerator:
             src_ratio = iw / ih
 
             if src_ratio > target_ratio:
-                # слишком широкая — режем по ширине
+                # шире — режем ширину
                 new_w = int(ih * target_ratio)
                 left = (iw - new_w) // 2
                 img = img.crop((left, 0, left + new_w, ih))
             else:
-                # слишком высокая — режем по высоте
+                # выше — режем высоту
                 new_h = int(iw / target_ratio)
                 top = (ih - new_h) // 2
                 img = img.crop((0, top, iw, top + new_h))
@@ -308,7 +327,6 @@ class KPPDFGenerator:
         if buf:
             c.drawImage(ImageReader(buf), x, y, width=w, height=h, mask="auto")
         else:
-            # placeholder
             c.setFillColor(colors.lightgrey)
             c.roundRect(x, y, w, h, radius, fill=1, stroke=0)
             c.setFillColor(colors.black)
@@ -322,11 +340,12 @@ class KPPDFGenerator:
     def _draw_top_header(self, c: canvas.Canvas, car_data: dict) -> float:
         """
         Верхняя строка:
-        - слева: имя пользователя (без фамилии/ID)
-        - справа: дата + номер КП
+        - слева: имя пользователя (только имя)
+        - справа: номер КП + дата
         """
         user_name = str(car_data.get("user_name") or "Менеджер").strip()
         date_str = datetime.now().strftime("%d.%m.%Y")
+
         kp_num = car_data.get("kp_number")
         if not kp_num:
             kp_num = datetime.now().strftime("KP-%Y%m%d-%H%M%S")
@@ -339,14 +358,14 @@ class KPPDFGenerator:
 
         c.drawRightString(self.width - self.margin, y, f"{kp_num} • {date_str}")
 
-        # тонкая линия
-        c.setStrokeColor(colors.HexColor("#e5e7eb"))
+        # divider
+        c.setStrokeColor(self.c_divider)
         c.setLineWidth(0.7)
         c.line(self.margin, y - 4.5 * mm, self.width - self.margin, y - 4.5 * mm)
 
         return y - 8 * mm
 
-    def _draw_car_title(self, c: canvas.Canvas, car_data: dict, y: float) -> float:
+    def _draw_car_title(self, c: canvas.Canvas, car_data: dict, y: float, reserve_price_on_first_page: bool) -> float:
         title = str(car_data.get("title") or "Автомобиль").strip()
         max_w = self.width - 2 * self.margin
 
@@ -354,17 +373,15 @@ class KPPDFGenerator:
         c.setFont(self.font_bold, 22)
 
         lines = self._wrap_text(title, self.font_bold, 22, max_w)
-        # максимум 2 строки
         lines = lines[:2] if lines else [title]
 
-        needed = len(lines) * 10.5 * mm
-        y = self._ensure_space(c, car_data, y, needed, reserve_price_on_first_page=True)
+        needed = len(lines) * 10.5 * mm + 5 * mm
+        y = self._ensure_space(c, car_data, y, needed, reserve_price_on_first_page)
 
         for ln in lines:
             c.drawString(self.margin, y, ln)
             y -= 10.5 * mm
 
-        # подзаголовок
         c.setFont(self.font, 11)
         c.setFillColor(self.c_grey_text)
         c.drawString(self.margin, y + 2 * mm, "Коммерческое предложение")
@@ -372,36 +389,30 @@ class KPPDFGenerator:
 
         return y
 
-    def _draw_hero_block(self, c: canvas.Canvas, car_data: dict, hero_photo: Optional[str], y: float) -> float:
+    def _draw_hero_block(self, c: canvas.Canvas, car_data: dict, hero_photo: Optional[str], y: float, reserve_price_on_first_page: bool) -> float:
         """
         Серый блок:
-        - слева короткие характеристики
-        - справа 1 большое фото
+        - слева: краткие характеристики
+        - справа: hero фото
         """
         block_h = 68 * mm
-        y = self._ensure_space(c, car_data, y, block_h, reserve_price_on_first_page=True)
+        y = self._ensure_space(c, car_data, y, block_h, reserve_price_on_first_page)
 
         x0 = self.margin
         y0 = y - block_h
         w0 = self.width - 2 * self.margin
 
-        # background rounded
         c.setFillColor(self.c_grey_bg)
-        c.setStrokeColor(colors.HexColor("#e5e7eb"))
-        c.setLineWidth(0.8)
         c.roundRect(x0, y0, w0, block_h, 8, fill=1, stroke=0)
 
-        # left specs area
         left_w = w0 * 0.44
         pad = 6 * mm
 
-        # right photo area
         photo_x = x0 + left_w + pad
         photo_w = w0 - left_w - 2 * pad
         photo_h = block_h - 2 * pad
         photo_y = y0 + pad
 
-        # draw hero photo
         if hero_photo:
             self._draw_image_frame(c, hero_photo, photo_x, photo_y, photo_w, photo_h, radius=8.0)
         else:
@@ -426,34 +437,25 @@ class KPPDFGenerator:
         ]
 
         tx = x0 + pad
-        ty = y - 10 * mm  # inside block
-
         c.setFillColor(self.c_title)
         c.setFont(self.font_bold, 12)
         c.drawString(tx, y0 + block_h - 10 * mm, "Кратко")
 
-        c.setFont(self.font, 10)
-        c.setFillColor(colors.black)
-
-        label_c = colors.HexColor("#111827")
-        value_c = colors.HexColor("#374151")
-
+        max_val_w = left_w - 2 * pad
         line_h = 8.0 * mm
         cur_y = y0 + block_h - 18 * mm
-        max_val_w = left_w - 2 * pad
 
         for label, value in items:
-            # label
             c.setFont(self.font, 8)
             c.setFillColor(self.c_grey_text)
             c.drawString(tx, cur_y, f"{label}")
 
-            # value (wrap)
             c.setFont(self.font_bold, 10)
-            c.setFillColor(value_c)
+            c.setFillColor(colors.HexColor("#374151"))
 
             v_lines = self._wrap_text(str(value or "—"), self.font_bold, 10, max_val_w)
             v_lines = v_lines[:2] if v_lines else ["—"]
+
             v_y = cur_y - 4.2 * mm
             for ln in v_lines:
                 c.drawString(tx, v_y, ln)
@@ -461,13 +463,14 @@ class KPPDFGenerator:
 
             cur_y -= line_h
 
-        return y0  # курсор после блока
+        return y0
 
-    def _draw_photos_grid(self, c: canvas.Canvas, photo_paths: List[str], y: float) -> float:
+    def _draw_photos_grid(self, c: canvas.Canvas, car_data: dict, photo_paths: List[str], y: float, reserve_price_on_first_page: bool) -> float:
         """
         Доп. фото под hero:
-        - до 6 фото
+        - максимум 6 фото
         - grid 3 колонки (2 ряда), адаптивно
+        - если не влазит на 1 стр. (с учетом плашки цены) — переносим на след. страницу
         """
         photos = [p for p in (photo_paths or []) if p][:6]
         if not photos:
@@ -478,32 +481,26 @@ class KPPDFGenerator:
 
         grid_w = self.width - 2 * self.margin
         cell_w = (grid_w - (cols - 1) * gap) / cols
-        cell_h = 36 * mm  # как в примерах: не квадрат, “каталожно”
+        cell_h = 36 * mm
         radius = 7.0
 
         rows = (len(photos) + cols - 1) // cols
         rows = min(rows, 2)
 
         needed_h = rows * cell_h + (rows - 1) * gap
-        y = self._ensure_space(c, car_data={}, y=y, needed=needed_h, reserve_price_on_first_page=True)  # car_data not used in this ensure in page 1
-        # но ensure_space требует car_data для футера; на первой странице мы не перелистываем тут (обычно хватает),
-        # на всякий случай: если перелистнет — футер будет без имени. Поэтому тут аккуратно: не перелистываем.
-        # Чтобы не ломать — просто не даём grid переполнить первую страницу:
-        bottom_limit = self._current_bottom_limit(True)
-        if y - needed_h < bottom_limit:
-            # если не влазит на первой странице — просто не рисуем сетку тут, она уйдет на страницу 2 через спецификацию/переход
-            return y
 
-        # рисуем
+        # если не хватает места — делаем новую страницу (в отличие от старой версии)
+        y = self._ensure_space(c, car_data, y, needed_h, reserve_price_on_first_page)
+
         idx = 0
         start_y = y
         for r in range(rows):
-            row_y_top = start_y - r * (cell_h + gap)
+            row_top = start_y - r * (cell_h + gap)
             for col in range(cols):
                 if idx >= len(photos):
                     break
                 x = self.margin + col * (cell_w + gap)
-                y0 = row_y_top - cell_h
+                y0 = row_top - cell_h
                 self._draw_image_frame(c, photos[idx], x, y0, cell_w, cell_h, radius=radius)
                 idx += 1
 
@@ -523,7 +520,6 @@ class KPPDFGenerator:
         c.drawString(self.margin, y, "Спецификация")
         y -= 7 * mm
 
-        # 3 columns layout
         cols = 3
         gap = 5 * mm
         usable_w = self.width - 2 * self.margin
@@ -534,18 +530,17 @@ class KPPDFGenerator:
         c.setFont(self.font, font_size)
         c.setFillColor(colors.black)
 
-        # We'll fill columns top-down, then move to next "row band" by tracking y positions per column.
-        # Safer approach: print items sequentially, always choosing the current shortest column (masonry).
+        # masonry columns: keep current y per column, always place to the highest column
         col_y = [y, y, y]
 
         def place_in_column(col_idx: int, lines: List[str]) -> None:
             nonlocal col_y
-            yy = col_y[col_idx]
             x = self.margin + col_idx * (col_w + gap)
+            yy = col_y[col_idx]
             for ln in lines:
                 c.drawString(x, yy, ln)
                 yy -= line_h
-            col_y[col_idx] = yy - 1.2 * mm  # spacing after item
+            col_y[col_idx] = yy - 1.2 * mm
 
         for item in spec_items:
             text = f"• {item}"
@@ -555,15 +550,17 @@ class KPPDFGenerator:
 
             needed = (len(lines) * line_h) + 2.5 * mm
 
-            # choose column with max remaining space (highest y)
+            # pick highest column
             col_idx = max(range(cols), key=lambda i: col_y[i])
 
-            # if any column doesn't have space (using the chosen column's y), we need a new page
             bottom = self._current_bottom_limit(reserve_price_on_first_page)
             if col_y[col_idx] - needed < bottom:
                 # new page
                 self._new_page(c, car_data)
-                # reset header region start
+
+                # after new page, no price reserve (price bar only on first page)
+                reserve_price_on_first_page = False
+
                 y = self.top_y - 12 * mm
                 c.setFont(self.font_bold, 13)
                 c.setFillColor(self.c_title)
@@ -574,31 +571,23 @@ class KPPDFGenerator:
                 c.setFillColor(colors.black)
                 col_y = [y, y, y]
 
-                # after moving to next page, price is only on first page, so reserve_price_on_first_page only matters on page 1
-                reserve_price_on_first_page = False
+                # recompute bottom for subsequent pages
+                bottom = self._current_bottom_limit(reserve_price_on_first_page)
 
             place_in_column(col_idx, lines)
 
-        # return minimal y among columns
         return min(col_y)
 
     def _draw_price_bar(self, c: canvas.Canvas, price_text: str, price_note: str):
-        """
-        Цена фиксируется внизу ПЕРВОЙ страницы.
-        """
-        # y position above footer
+        """Плашка цены фиксировано на 1 странице."""
         y0 = self.footer_y + 8 * mm
         x0 = self.margin
         w0 = self.width - 2 * self.margin
         h0 = self.pricebar_height
 
-        # background
         c.setFillColor(self.c_grey_bg)
-        c.setStrokeColor(colors.HexColor("#e5e7eb"))
-        c.setLineWidth(0.8)
         c.roundRect(x0, y0, w0, h0, 8, fill=1, stroke=0)
 
-        # text
         c.setFont(self.font_bold, 14)
         c.setFillColor(self.c_title)
         c.drawString(x0 + 6 * mm, y0 + 6.2 * mm, "Стоимость:")
@@ -607,26 +596,19 @@ class KPPDFGenerator:
         c.setFillColor(self.c_accent)
         c.drawString(x0 + 40 * mm, y0 + 6.0 * mm, price_text)
 
-        c.setFont(self.font, 9)
-        c.setFillColor(self.c_grey_text)
-        note = price_note.strip()
+        note = (price_note or "").strip()
         if note:
+            c.setFont(self.font, 9)
+            c.setFillColor(self.c_grey_text)
             c.drawRightString(x0 + w0 - 6 * mm, y0 + 6.5 * mm, note)
 
-    def _draw_footer(self, c: canvas.Canvas, car_data: dict):
-        """
-        Низ страницы:
-        - юридическая строка (про 3 дня/комплектацию/фото)
-        - слева дата
-        - справа "Коммерческое предложение"
-        """
-        legal = "Остальные фото — по запросу. Комплектацию уточняйте у менеджера. Предложение действительно в течение 3 дней."
+    def _draw_footer(self, c: canvas.Canvas):
+        """Футер на каждой странице."""
         date_str = datetime.now().strftime("%d.%m.%Y")
 
         c.setFont(self.font, 7.8)
         c.setFillColor(self.c_grey_text)
-        # юридическая строка по центру
-        c.drawCentredString(self.width / 2, self.footer_y + 6 * mm, legal)
+        c.drawCentredString(self.width / 2, self.footer_y + 6 * mm, self.legal_text)
 
         c.setFont(self.font, 8)
         c.drawString(self.margin, self.footer_y, f"Дата создания: {date_str}")
@@ -638,21 +620,6 @@ class KPPDFGenerator:
 # -----------------------------
 
 def generate_kp_pdf(car_data: dict, photo_paths: list, output_path: str = None) -> str:
-    """
-    car_data expected keys (минимум):
-      - title
-      - year
-      - engine_short
-      - gearbox
-      - drive
-      - color
-      - mileage_km
-      - price_rub
-      - price_note
-      - spec_items (list OR string with bullets)
-      - user_name (имя пользователя для шапки)  <-- ВАЖНО
-      - kp_number (опционально)
-    """
     if output_path is None:
         title = car_data.get("title", "KP")
         safe = "".join(ch if ch.isalnum() or ch in ("_", "-") else "_" for ch in str(title))

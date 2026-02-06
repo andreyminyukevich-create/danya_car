@@ -13,6 +13,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from parser import CarDescriptionParser
+from sheets_logger import sheets_logger
 
 # Настройка логирования
 logging.basicConfig(
@@ -143,14 +144,6 @@ def format_car_card(data: dict) -> str:
         lines.append("\n📋 **Спецификация:** пусто")
     
     return "\n".join(lines)
-
-
-def escape_markdown(text: str) -> str:
-    """Экранирует спецсимволы для Markdown"""
-    special_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
-    for char in special_chars:
-        text = text.replace(char, f'\\{char}')
-    return text
 
 
 # ==================== ХЕНДЛЕРЫ ====================
@@ -373,8 +366,16 @@ async def finalize_kp(callback: types.CallbackQuery, state: FSMContext):
     await callback.message.answer("⏳ Создаю PDF... Подожди немного.")
     
     try:
+        # Логируем в Google Sheets
+        username = callback.from_user.full_name or callback.from_user.username or "Unknown"
+        sheets_logger.log_kp(
+            user_id=callback.from_user.id,
+            username=username,
+            car_data=car_data,
+            photos_count=len(photos)
+        )
+        
         # TODO: Здесь будет генерация PDF
-        # Пока заглушка
         
         kp_info = (
             f"✅ **КП готово!**\n\n"
@@ -382,7 +383,8 @@ async def finalize_kp(callback: types.CallbackQuery, state: FSMContext):
             f"📅 {car_data.get('year', '—')}\n"
             f"💰 {car_data.get('price_rub', '—'):,} руб\n\n".replace(',', ' ')
         )
-        kp_info += "📄 PDF будет готов на следующем этапе разработки"
+        kp_info += "📄 PDF будет готов на следующем этапе разработки\n"
+        kp_info += "📊 Данные записаны в Google Sheets"
         
         await callback.message.answer(
             kp_info,
@@ -395,9 +397,9 @@ async def finalize_kp(callback: types.CallbackQuery, state: FSMContext):
         await callback.answer("Готово! ✅")
         
     except Exception as e:
-        logger.error(f"Error creating PDF: {e}")
+        logger.error(f"Error creating KP: {e}")
         await callback.message.answer(
-            "❌ Ошибка при создании PDF. Попробуй ещё раз.",
+            "❌ Ошибка при создании КП. Попробуй ещё раз.",
             reply_markup=get_main_menu()
         )
         await state.clear()

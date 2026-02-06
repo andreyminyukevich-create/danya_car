@@ -442,14 +442,17 @@ async def finalize_kp(callback: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
     photos = data.get("photos", [])
     car_data = data.get("car_data", {})
-        user_name = (callback.from_user.first_name or "").strip()
+
+    # ✅ Имя пользователя (только имя)
+    user_name = (callback.from_user.first_name or "").strip()
     if not user_name:
         user_name = (callback.from_user.username or "Менеджер").strip()
     car_data["user_name"] = user_name
+
     if len(photos) < 3:
         await callback.answer("⚠️ Нужно минимум 3 фото!", show_alert=True)
         return
-    
+
     await callback.message.answer("⏳ Создаю PDF... Подожди немного.")
     
     try:

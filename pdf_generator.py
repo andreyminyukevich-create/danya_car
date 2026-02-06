@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
 Генератор PDF для коммерческих предложений
+С поддержкой кириллицы
 """
 
 import os
@@ -23,8 +24,24 @@ class KPPDFGenerator:
         self.width, self.height = A4
         self.margin = 20 * mm
         
-        # Регистрируем шрифты (используем стандартные)
-        # В production можно добавить кастомные шрифты
+        # Регистрируем шрифты с поддержкой кириллицы
+        try:
+            # Пробуем DejaVu (обычно есть в Linux)
+            pdfmetrics.registerFont(TTFont('DejaVu', '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf'))
+            pdfmetrics.registerFont(TTFont('DejaVu-Bold', '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf'))
+            self.font = 'DejaVu'
+            self.font_bold = 'DejaVu-Bold'
+        except:
+            try:
+                # Альтернатива: Liberation (тоже часто есть)
+                pdfmetrics.registerFont(TTFont('Liberation', '/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf'))
+                pdfmetrics.registerFont(TTFont('Liberation-Bold', '/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf'))
+                self.font = 'Liberation'
+                self.font_bold = 'Liberation-Bold'
+            except:
+                # Последний вариант: используем Helvetica (без кириллицы, но хоть что-то)
+                self.font = 'Helvetica'
+                self.font_bold = 'Helvetica-Bold'
     
     def generate(self, car_data: dict, photo_paths: list, output_path: str):
         """
@@ -58,14 +75,14 @@ class KPPDFGenerator:
     def _draw_header(self, c: canvas.Canvas, car_data: dict):
         """Рисует заголовок"""
         # Название автомобиля
-        c.setFont("Helvetica-Bold", 24)
+        c.setFont(self.font_bold, 24)
         title = car_data.get('title', 'Автомобиль')
         c.drawString(self.margin, self.height - 40*mm, title)
         
         # Год
         year = car_data.get('year')
         if year:
-            c.setFont("Helvetica", 16)
+            c.setFont(self.font, 16)
             c.drawString(self.margin, self.height - 50*mm, f"Год выпуска: {year}")
         
         # Линия
@@ -126,8 +143,8 @@ class KPPDFGenerator:
                 # Рисуем заглушку
                 c.setFillColor(colors.lightgrey)
                 c.rect(x, y, photo_width, photo_height, fill=1)
-                c.setFillColor(colors.white)
-                c.setFont("Helvetica", 10)
+                c.setFillColor(colors.black)
+                c.setFont(self.font, 10)
                 c.drawCentredString(x + photo_width/2, y + photo_height/2, "Фото недоступно")
     
     def _draw_main_info(self, c: canvas.Canvas, car_data: dict):
@@ -135,12 +152,12 @@ class KPPDFGenerator:
         start_y = self.height - 210*mm
         
         # Заголовок секции
-        c.setFont("Helvetica-Bold", 14)
+        c.setFont(self.font_bold, 14)
         c.setFillColor(colors.black)
         c.drawString(self.margin, start_y, "ОСНОВНЫЕ ХАРАКТЕРИСТИКИ")
         
         start_y -= 8*mm
-        c.setFont("Helvetica", 11)
+        c.setFont(self.font, 11)
         
         # Данные
         info_items = [
@@ -159,9 +176,9 @@ class KPPDFGenerator:
                 info_items.append(("Пробег:", f"{mileage:,} км".replace(',', ' ')))
         
         for label, value in info_items:
-            c.setFont("Helvetica-Bold", 11)
+            c.setFont(self.font_bold, 11)
             c.drawString(self.margin, start_y, label)
-            c.setFont("Helvetica", 11)
+            c.setFont(self.font, 11)
             c.drawString(self.margin + 50*mm, start_y, str(value))
             start_y -= 6*mm
         
@@ -176,7 +193,7 @@ class KPPDFGenerator:
             
             # Текст цены
             c.setFillColor(colors.black)
-            c.setFont("Helvetica-Bold", 18)
+            c.setFont(self.font_bold, 18)
             price_text = f"{price:,} руб.".replace(',', ' ')
             c.drawString(self.margin, start_y + 3*mm, "ЦЕНА:")
             
@@ -185,7 +202,7 @@ class KPPDFGenerator:
             
             # Примечание к цене
             c.setFillColor(colors.grey)
-            c.setFont("Helvetica", 9)
+            c.setFont(self.font, 9)
             price_note = car_data.get('price_note', 'с НДС')
             c.drawString(self.margin, start_y - 2*mm, price_note)
     
@@ -203,22 +220,22 @@ class KPPDFGenerator:
             start_y = self.height - 40*mm
         
         # Заголовок
-        c.setFont("Helvetica-Bold", 14)
+        c.setFont(self.font_bold, 14)
         c.setFillColor(colors.black)
         c.drawString(self.margin, start_y, "ДОПОЛНИТЕЛЬНАЯ СПЕЦИФИКАЦИЯ")
         
         start_y -= 8*mm
         
-        # Рисуем спецификацию в 3 колонки
-        c.setFont("Helvetica", 9)
-        col_width = (self.width - 2 * self.margin - 10*mm) / 3
+        # Рисуем спецификацию в 2 колонки (было 3, но кириллица шире)
+        c.setFont(self.font, 9)
+        col_width = (self.width - 2 * self.margin - 5*mm) / 2
         
         for i, item in enumerate(spec_items):
-            col = i % 3
-            row = i // 3
+            col = i % 2
+            row = i // 2
             
             x = self.margin + col * (col_width + 5*mm)
-            y = start_y - row * 5*mm
+            y = start_y - row * 6*mm
             
             # Проверка на переполнение страницы
             if y < 30*mm:
@@ -226,18 +243,22 @@ class KPPDFGenerator:
                 start_y = self.height - 40*mm
                 y = start_y
             
+            # Обрезаем длинные строки
+            if len(item) > 40:
+                item = item[:37] + '...'
+            
             c.drawString(x, y, f"• {item}")
     
     def _draw_footer(self, c: canvas.Canvas):
         """Рисует футер"""
-        c.setFont("Helvetica", 8)
+        c.setFont(self.font, 8)
         c.setFillColor(colors.grey)
         
         # Дата
         date_str = datetime.now().strftime("%d.%m.%Y")
         c.drawString(self.margin, 20*mm, f"Дата создания: {date_str}")
         
-        # Контакты (можно настроить)
+        # Контакты
         c.drawRightString(self.width - self.margin, 20*mm, 
                           "Коммерческое предложение")
 
@@ -256,7 +277,7 @@ def generate_kp_pdf(car_data: dict, photo_paths: list, output_path: str = None) 
     """
     if output_path is None:
         # Генерируем имя файла
-        title = car_data.get('title', 'KP').replace(' ', '_')
+        title = car_data.get('title', 'KP').replace(' ', '_')[:30]
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_path = f"/tmp/KP_{title}_{timestamp}.pdf"
     

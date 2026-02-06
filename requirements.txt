@@ -1,5 +1,18 @@
-aiogram==3.4.1
-gspread==5.12.4
-google-auth==2.23.4
-google-auth-oauthlib==1.1.0
-google-auth-httplib2==0.1.1
+# Telegram бот
+aiogram==3.13.1
+
+# Google Sheets
+gspread==6.1.4
+google-auth==2.36.0
+google-auth-oauthlib==1.2.1
+google-auth-httplib2==0.2.0
+
+# Обработка изображений
+Pillow==10.4.0
+
+# PDF генерация
+reportlab==4.2.5
+
+# Дополнительные зависимости
+aiohttp==3.10.11
+aiofiles==24.1.0

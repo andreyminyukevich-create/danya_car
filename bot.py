@@ -172,10 +172,12 @@ async def cmd_start(message: types.Message, state: FSMContext):
 
 
 @dp.message(F.text == "📝 Создать КП")
+@dp.message(F.text == "📝 Создать КП")
 async def start_create_kp(message: types.Message, state: FSMContext):
     """Начало создания КП"""
     await state.clear()
     
+    # Убираем клавиатуру
     await message.answer(
         "📋 Отлично! Давай создадим КП.\n\n"
         "**Шаг 1 из 2:** Отправь мне описание автомобиля.\n\n"
@@ -185,13 +187,12 @@ async def start_create_kp(message: types.Message, state: FSMContext):
         "3. Скопируй (Ctrl+C или Cmd+C)\n"
         "4. Вставь сюда (Ctrl+V или Cmd+V)\n\n"
         "Бот автоматически найдёт все нужные данные! ✨\n\n"
-        "_Или нажми кнопку \"📖 Инструкция\" для подробной инструкции_",
-        parse_mode="Markdown"
+        "_Или нажми /help для подробной инструкции_",
+        parse_mode="Markdown",
+        reply_markup=types.ReplyKeyboardRemove()  # Убираем кнопки
     )
     await state.set_state(KPStates.waiting_description)
     logger.info(f"User {message.from_user.id} started creating KP")
-
-
 @dp.message(F.text == "📖 Инструкция")
 async def show_instruction(message: types.Message):
     """Показывает подробную инструкцию"""
@@ -388,20 +389,19 @@ async def handle_photo(message: types.Message, state: FSMContext):
     photos.append(photo_file_id)
     await state.update_data(photos=photos)
     
-    status_text = f"✅ Загружено фото: {len(photos)}/4"
-    
-    if len(photos) >= 3:
-        status_text += "\n\n🎉 Минимум достигнут! Можешь нажать \"Готово\" или загрузить ещё."
+    # Правильный текст
+    if len(photos) >= 4:
+        status_text = f"✅ Загружено {len(photos)}/4 фото\n\n🎉 Максимум достигнут! Нажми \"Готово\" для создания PDF."
+    elif len(photos) >= 3:
+        status_text = f"✅ Загружено {len(photos)}/4 фото\n\n🎉 Минимум достигнут! Можешь нажать \"Готово\" или загрузить ещё (до 4)."
     else:
-        status_text += f"\n\nОсталось минимум: {3 - len(photos)}"
+        status_text = f"✅ Загружено {len(photos)}/4 фото\n\nОсталось минимум: {3 - len(photos)}"
     
     await message.answer(
         status_text,
         reply_markup=get_photos_kb(len(photos))
     )
     logger.info(f"User {message.from_user.id} uploaded photo {len(photos)}/4")
-
-
 @dp.callback_query(F.data == "photos_done")
 async def finalize_kp(callback: types.CallbackQuery, state: FSMContext):
     """Создание PDF"""

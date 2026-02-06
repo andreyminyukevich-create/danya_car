@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Парсер описаний автомобилей для КП
-Понимает ЛЮБОЙ формат копипаста с Авито
+Понимает ЛЮБОЙ копипаст с Авито (даже с мусором)
 """
 
 import re
@@ -19,10 +19,12 @@ class CarDescriptionParser:
             'задний': 'Задний',
             '4wd': 'Полный',
             'awd': 'Полный',
+            '4matic': 'Полный',
             'fwd': 'Передний',
             'rwd': 'Задний',
             'quattro': 'Полный',
             '4x4': 'Полный',
+            'xdrive': 'Полный',
         }
         
         self.gearbox_types = {
@@ -31,11 +33,13 @@ class CarDescriptionParser:
             'робот': 'Робот',
             'вариатор': 'Вариатор',
             'at': 'Автомат',
+            'amt': 'Автомат',
             'mt': 'Механика',
-            'amt': 'Робот',
             'cvt': 'Вариатор',
             'dsg': 'Робот',
             'steptronic': 'Автомат',
+            'g-tronic': 'Автомат',
+            '9g-tronic': 'Автомат',
         }
         
         self.engine_types = {
@@ -61,110 +65,140 @@ class CarDescriptionParser:
             'бежевый': 'Бежевый',
             'золотой': 'Золотой',
             'оранжевый': 'Оранжевый',
+            'фиолетовый': 'Фиолетовый',
         }
+        
+        # Список "мусора" из Авито
+        self.garbage_keywords = [
+            'для бизнеса', 'карьера', 'помощь', 'каталоги', 'мои объявления',
+            'сообщения', 'главная', 'транспорт', 'автомобили', 'новые',
+            'аватар', 'все характеристики', 'расположение', 'описание',
+            'дополнительные опции', 'стоимость владения', 'другие объявления',
+            'а это наш журнал', 'безопасность', 'реклама на сайте',
+            'политика конфиденциальности', 'правила авито', 'оферту',
+            'показать карту', 'изменить регион', 'спросите у продавца',
+            'контактное лицо', 'компания', 'свежие объявления'
+        ]
     
     def parse(self, text: str) -> Dict:
         """
         Основная функция парсинга
         Возвращает словарь с извлеченными данными
         """
-        text_lower = text.lower()
+        # Очищаем текст от мусора
+        cleaned_text = self._clean_text(text)
+        text_lower = cleaned_text.lower()
         
         result = {
-            'title': self._extract_title(text),
-            'year': self._extract_year(text),
+            'title': self._extract_title(cleaned_text),
+            'year': self._extract_year(cleaned_text),
             'drive': self._extract_drive(text_lower),
-            'engine_short': self._extract_engine(text),
+            'engine_short': self._extract_engine(cleaned_text),
             'gearbox': self._extract_gearbox(text_lower),
             'color': self._extract_color(text_lower),
-            'mileage_km': self._extract_mileage(text),
-            'price_rub': None,
+            'mileage_km': self._extract_mileage(cleaned_text),
+            'price_rub': self._extract_price(text),
             'price_note': 'с НДС',
-            'spec_items': self._extract_spec_items(text),
+            'spec_items': self._extract_spec_items(cleaned_text),
         }
         
         return result
     
+    def _clean_text(self, text: str) -> str:
+        """Убирает мусор из копипаста"""
+        lines = text.split('\n')
+        clean_lines = []
+        
+        for line in lines:
+            line_stripped = line.strip()
+            line_lower = line_stripped.lower()
+            
+            # Пропускаем пустые строки
+            if not line_stripped:
+                continue
+            
+            # Пропускаем мусор
+            is_garbage = False
+            for keyword in self.garbage_keywords:
+                if keyword in line_lower:
+                    is_garbage = True
+                    break
+            
+            # Пропускаем короткие строки с цифрами (номера, даты объявлений)
+            if len(line_stripped) < 10 and re.match(r'^[\d\s:—]+$', line_stripped):
+                is_garbage = True
+            
+            # Пропускаем строки с иконками/эмодзи
+            if '◾' in line_stripped or '▪' in line_stripped or '✅' in line_stripped:
+                is_garbage = True
+            
+            if not is_garbage:
+                clean_lines.append(line_stripped)
+        
+        return '\n'.join(clean_lines)
+    
     def _extract_title(self, text: str) -> Optional[str]:
         """Извлекает название (марка + модель + модификация)"""
         
-        # Шаг 1: Находим марку и модель
-        brand_model = None
+        # Шаг 1: Находим основное название (формат Авито)
+        # "Mercedes-Benz AMG GT 4.0 AT, 2025"
+        match = re.search(r'([A-Z][A-Za-z\-]+(?:\s+[A-Z][A-Za-z\-]+)*(?:\s+[A-Z0-9\-]+)*)\s+(\d\.\d+)\s+([A-Z]{2,})(?:,\s*\d{4})?', text)
+        if match:
+            brand_model = match.group(0).strip()
+            # Убираем год в конце
+            brand_model = re.sub(r',\s*\d{4}$', '', brand_model)
+            
+            # Добавляем модификацию если есть
+            modification = self._extract_modification(text)
+            if modification and modification not in brand_model:
+                return f"{brand_model} ({modification})"
+            return brand_model
         
-        # Вариант 1: Ищем известные марки в начале текста
+        # Вариант 2: Ищем известные бренды
         brands = [
-            'Land Rover', 'Range Rover', 'BMW', 'Mercedes-Benz', 'Mercedes', 
-            'Audi', 'Porsche', 'Toyota', 'Lexus', 'Volkswagen', 'Volvo',
-            'Tesla', 'Ford', 'Chevrolet', 'Nissan', 'Honda', 'Mazda',
-            'Hyundai', 'Kia', 'Subaru', 'Mitsubishi', 'Jaguar',
-            'Bentley', 'Rolls-Royce', 'Lamborghini', 'Ferrari', 'Maserati'
+            'Mercedes-Benz', 'Mercedes', 'Land Rover', 'Range Rover',
+            'BMW', 'Audi', 'Porsche', 'Toyota', 'Lexus', 'Volkswagen',
+            'Volvo', 'Tesla', 'Ford', 'Chevrolet', 'Nissan', 'Honda',
+            'Mazda', 'Hyundai', 'Kia', 'Subaru', 'Mitsubishi',
+            'Jaguar', 'Bentley', 'Rolls-Royce', 'Cadillac', 'Lamborghini',
+            'Ferrari', 'Maserati', 'Aston Martin', 'McLaren'
         ]
         
         for brand in brands:
-            # Ищем бренд + что-то после него (модель)
-            pattern = rf'\b{re.escape(brand)}\s+([A-Za-z0-9\s-]+?)(?:\s+\d\.\d+|\s+AT|\s+MT|,|\d{{4}}|$)'
+            pattern = rf'\b{re.escape(brand)}\s+([A-Za-z0-9\s\-]+?)(?:\s+\d\.\d+|\s+AT|\s+MT|,|\n|$)'
             match = re.search(pattern, text, re.IGNORECASE)
             if match:
-                brand_model = match.group(0).strip()
-                # Убираем год в конце
-                brand_model = re.sub(r',?\s*\d{4}$', '', brand_model)
-                break
+                result = match.group(0).strip()
+                result = re.sub(r',\s*\d{4}.*$', '', result)
+                return result
         
-        # Вариант 2: Ищем перед "Характеристики"
-        if not brand_model:
-            lines = [l.strip() for l in text.split('\n') if l.strip()]
-            for i, line in enumerate(lines):
-                if 'характеристики' in line.lower():
-                    # Ищем подходящую строку выше
-                    for j in range(max(0, i-5), i):
-                        candidate = lines[j]
-                        # Должна содержать буквы и быть достаточно длинной
-                        if len(candidate) > 10 and re.search(r'[A-Za-z]', candidate):
-                            # Не должна быть мусором (кнопки, меню)
-                            if not any(x in candidate.lower() for x in ['помощь', 'каталог', 'объявлени', 'сообщени', 'поиск']):
-                                brand_model = candidate
-                                brand_model = re.sub(r',?\s*\d{4}.*$', '', brand_model)
-                                break
-                    if brand_model:
-                        break
-        
-        # Шаг 2: Добавляем модификацию если есть
-        modification = None
-        
-        # Ищем "Модификация:"
-        match = re.search(r'Модификация:\s*([^\n]+)', text, re.IGNORECASE)
-        if match:
-            modification = match.group(1).strip()
-        
-        # Или ищем модификацию в самом названии (P530, 30i, 40d и т.д.)
-        if not modification and brand_model:
-            mod_match = re.search(r'\b([A-Z]?\d{2,4}[a-z]?(?:\s+\d\.\d+)?(?:\s+[A-Z]{2,})?(?:\s+\([^\)]+\))?)', text)
-            if mod_match:
-                modification = mod_match.group(1)
-        
-        # Собираем итоговое название
-        if brand_model and modification:
-            return f"{brand_model} {modification}"
-        elif brand_model:
-            return brand_model
-        elif modification:
+        # Вариант 3: Берём модификацию как основу
+        modification = self._extract_modification(text)
+        if modification:
             return modification
         
         return None
     
+    def _extract_modification(self, text: str) -> Optional[str]:
+        """Извлекает модификацию"""
+        match = re.search(r'Модификация:\s*([^\n]+)', text, re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
+        return None
+    
     def _extract_year(self, text: str) -> Optional[int]:
         """Извлекает год"""
-        # Приоритет 1: "Год выпуска:"
+        # Приоритет: "Год выпуска:"
         match = re.search(r'Год\s+выпуска:\s*(\d{4})', text, re.IGNORECASE)
         if match:
             return int(match.group(1))
         
-        # Приоритет 2: Ищем 20XX рядом с другими данными
-        matches = re.findall(r'\b(20\d{2})\b', text)
+        # Ищем год в диапазоне 2015-2030
+        matches = re.findall(r'\b(20[12]\d)\b', text)
         if matches:
-            # Берём самый свежий год
-            years = [int(y) for y in matches]
-            return max(years)
+            years = [int(y) for y in matches if 2015 <= int(y) <= 2030]
+            if years:
+                return max(years)
         
         return None
     
@@ -177,25 +211,27 @@ class CarDescriptionParser:
                 if key in drive_text:
                     return value
         
+        # Ищем в тексте
         for key, value in self.drive_types.items():
-            if f' {key} ' in f' {text_lower} ' or f' {key},' in text_lower or f' {key}\n' in text_lower:
+            # Ищем целое слово
+            if re.search(rf'\b{key}\b', text_lower):
                 return value
         
         return None
     
     def _extract_engine(self, text: str) -> Optional[str]:
-        """Извлекает двигатель"""
+        """Извлекает двигатель (мощность + объем + тип)"""
         power = None
         volume = None
         engine_type = None
         
-        # Мощность - ищем в скобках (530 л.с.) или отдельно
+        # Мощность - ищем (585 л.с.) или 585 л.с.
         match = re.search(r'(\d{2,4})\s*л\.?\s*с\.?', text, re.IGNORECASE)
         if match:
             power = match.group(1)
         
-        # Объем - "4.4 л" или "Объём двигателя: 4.4 л"
-        match = re.search(r'(?:Объём двигателя:\s*)?([\d,\.]+)\s*л(?:\s|$|,)', text, re.IGNORECASE)
+        # Объем - "4.0" или "4 л"
+        match = re.search(r'(?:Объём двигателя:\s*)?([\d,\.]+)\s*л(?:\s|,|$)', text, re.IGNORECASE)
         if match:
             volume = match.group(1).replace(',', '.')
         
@@ -229,14 +265,9 @@ class CarDescriptionParser:
                 if key in gearbox_text:
                     return value
         
-        # Ищем AT/MT в названии
-        if ' at' in text_lower or ' at,' in text_lower or ' at ' in text_lower:
-            return 'Автомат'
-        if ' mt' in text_lower or ' mt,' in text_lower or ' mt ' in text_lower:
-            return 'Механика'
-        
+        # Ищем в тексте (с учётом границ слов)
         for key, value in self.gearbox_types.items():
-            if key in text_lower:
+            if re.search(rf'\b{re.escape(key)}\b', text_lower):
                 return value
         
         return None
@@ -250,26 +281,50 @@ class CarDescriptionParser:
                 if key in color_text:
                     return value
         
+        # Ищем в тексте
         for key, value in self.colors.items():
-            if f' {key}' in text_lower or f'{key} ' in text_lower:
+            if re.search(rf'\b{key}\b', text_lower):
                 return value
         
         return None
     
     def _extract_mileage(self, text: str) -> Optional[int]:
         """Извлекает пробег"""
-        if 'новый' in text.lower() or 'новая' in text.lower() or 'новое' in text.lower():
+        text_lower = text.lower()
+        
+        # Новый автомобиль = 0 км
+        if 'новый' in text_lower or 'новая' in text_lower or 'новое' in text_lower:
             return 0
         
-        # Ищем пробег
-        match = re.search(r'(\d[\d\s]*)\s*км', text.lower())
+        # Ищем пробег в км
+        match = re.search(r'(\d[\d\s]*)\s*км', text_lower)
         if match:
             mileage_str = match.group(1).replace(' ', '')
             mileage = int(mileage_str)
-            # Если меньше 1000, значит в тысячах (50 км = 50000)
+            # Если меньше 1000, умножаем (50 = 50000)
             if mileage < 1000:
                 mileage *= 1000
             return mileage
+        
+        return None
+    
+    def _extract_price(self, text: str) -> Optional[int]:
+        """Извлекает цену"""
+        # Ищем цену в формате "31 970 000 ₽" или "31970000"
+        match = re.search(r'([\d\s]+)\s*₽', text)
+        if match:
+            price_str = match.group(1).replace(' ', '')
+            try:
+                return int(price_str)
+            except ValueError:
+                pass
+        
+        # Ищем просто большое число (скорее всего цена)
+        matches = re.findall(r'\b(\d{7,})\b', text)
+        if matches:
+            # Берём самое большое число (обычно это цена)
+            prices = [int(m) for m in matches]
+            return max(prices)
         
         return None
     
@@ -278,15 +333,17 @@ class CarDescriptionParser:
         spec_items = []
         
         patterns = [
+            (r'Поколение:\s*([^\n]+)', 'Поколение: {}'),
+            (r'Модификация:\s*([^\n]+)', 'Модификация: {}'),
             (r'Объём двигателя:\s*([^\n]+)', 'Объём двигателя: {}'),
             (r'Тип двигателя:\s*([^\n]+)', 'Тип двигателя: {}'),
-            (r'Мощность[,\s]*л\.?с\.?:\s*(\d+)', 'Мощность, л.с.: {}'),
             (r'Коробка передач:\s*([^\n]+)', 'Коробка передач: {}'),
             (r'Привод:\s*([^\n]+)', 'Привод: {}'),
             (r'Комплектация:\s*([^\n]+)', 'Комплектация: {}'),
             (r'Тип кузова:\s*([^\n]+)', 'Тип кузова: {}'),
-            (r'Поколение:\s*([^\n]+)', 'Поколение: {}'),
             (r'Руль:\s*([^\n]+)', 'Руль: {}'),
+            (r'ПТС:\s*([^\n]+)', 'ПТС: {}'),
+            (r'Состояние:\s*([^\n]+)', 'Состояние: {}'),
         ]
         
         for pattern, template in patterns:

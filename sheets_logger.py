@@ -8,7 +8,7 @@ import json
 import logging
 from datetime import datetime
 import gspread
-from oauth2client.service_account import ServiceAccountCredentials
+from google.oauth2 import service_account
 
 logger = logging.getLogger(__name__)
 
@@ -43,9 +43,9 @@ class SheetsLogger:
                 'https://www.googleapis.com/auth/drive'
             ]
             
-            credentials = ServiceAccountCredentials.from_json_keyfile_dict(
-                creds_dict, 
-                scope
+            credentials = service_account.Credentials.from_service_account_info(
+                creds_dict,
+                scopes=scope
             )
             
             # Подключаемся

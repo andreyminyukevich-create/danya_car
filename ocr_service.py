@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 
 """
-OCR сервис на EasyOCR (нейросеть).
-Точнее чем Tesseract для мобильных скриншотов Авито.
+OCR сервис на Tesseract.
+Быстрый и стабильный для Railway.
 """
 
 from __future__ import annotations
@@ -14,21 +14,15 @@ from typing import Optional
 
 from PIL import Image, ImageOps, ImageEnhance
 
-# Пытаемся импортировать EasyOCR
-try:
-    import easyocr
-    EASYOCR_AVAILABLE = True
-except ImportError:
-    EASYOCR_AVAILABLE = False
-    print("⚠️ EasyOCR not available, falling back to Tesseract")
-
-# Fallback на Tesseract
+# Tesseract
 try:
     import pytesseract
     TESSERACT_AVAILABLE = True
 except ImportError:
     TESSERACT_AVAILABLE = False
+    print("❌ Tesseract not available")
 
+# OpenCV (опционально)
 try:
     import cv2
     import numpy as np
@@ -53,26 +47,6 @@ GARBAGE_PATTERNS = [
 ]
 
 
-# Глобальный reader (инициализируется один раз)
-_easyocr_reader = None
-
-
-def get_easyocr_reader():
-    """Получить EasyOCR reader (инициализируется один раз)"""
-    global _easyocr_reader
-    
-    if _easyocr_reader is None and EASYOCR_AVAILABLE:
-        print("🔄 Initializing EasyOCR (first time only)...")
-        _easyocr_reader = easyocr.Reader(
-            ['ru', 'en'],
-            gpu=False,  # CPU mode (Railway не даёт GPU)
-            verbose=False
-        )
-        print("✅ EasyOCR initialized")
-    
-    return _easyocr_reader
-
-
 def _crop_borders(img: Image.Image) -> Image.Image:
     """Обрезает верх и низ скриншота (кнопки/меню)"""
     width, height = img.size
@@ -81,34 +55,26 @@ def _crop_borders(img: Image.Image) -> Image.Image:
     return img.crop((0, crop_top, width, crop_bottom))
 
 
-def _preprocess_for_easyocr(img: Image.Image) -> Image.Image:
-    """Лёгкая предобработка для EasyOCR (нейросеть сама справится)"""
+def _preprocess_image(img: Image.Image) -> Image.Image:
+    """Предобработка изображения для Tesseract"""
     if img.mode != "RGB":
         img = img.convert("RGB")
     
     # Обрезаем кнопки
     img = _crop_borders(img)
     
-    # Увеличение x2 (EasyOCR любит больше пикселей)
-    scale = 2
-    img = img.resize((img.width * scale, img.height * scale), Image.Resampling.LANCZOS)
-    
-    return img
-
-
-def _preprocess_for_tesseract(img: Image.Image) -> Image.Image:
-    """Агрессивная предобработка для Tesseract"""
-    if img.mode != "RGB":
-        img = img.convert("RGB")
-    
-    img = _crop_borders(img)
+    # Серый
     img = ImageOps.grayscale(img)
     
+    # Увеличение x3
     scale = 3
     img = img.resize((img.width * scale, img.height * scale), Image.Resampling.LANCZOS)
     
+    # Контраст + резкость
     img = ImageEnhance.Contrast(img).enhance(2.0)
     img = ImageEnhance.Sharpness(img).enhance(2.0)
+    
+    # Threshold
     img = img.point(lambda x: 0 if x < 140 else 255, mode="1")
     
     return img
@@ -146,60 +112,28 @@ def _clean_text(text: str) -> str:
 def ocr_image_to_text(image_path: str) -> str:
     """
     Главная функция OCR.
-    Использует EasyOCR (нейросеть) если доступен, иначе Tesseract.
+    Использует Tesseract (быстро и стабильно).
     """
-    img = Image.open(image_path)
+    if not TESSERACT_AVAILABLE:
+        print("❌ Tesseract not available!")
+        return ""
     
-    # Приоритет 1: EasyOCR (лучшая точность)
-    if EASYOCR_AVAILABLE:
-        try:
-            print(f"🔍 Using EasyOCR for {os.path.basename(image_path)}")
-            
-            # Лёгкая предобработка
-            img_prep = _preprocess_for_easyocr(img)
-            
-            # Сохраняем временно для EasyOCR
-            temp_path = image_path.replace('.jpg', '_prep.jpg')
-            img_prep.save(temp_path)
-            
-            # EasyOCR
-            reader = get_easyocr_reader()
-            results = reader.readtext(temp_path, detail=0, paragraph=True)
-            
-            # Склеиваем результаты
-            text = '\n'.join(results)
-            
-            # Удаляем временный файл
-            if os.path.exists(temp_path):
-                os.remove(temp_path)
-            
-            # Чистим мусор
-            text = _clean_text(text)
-            
-            print(f"✅ EasyOCR recognized {len(text)} chars")
-            return text
-            
-        except Exception as e:
-            print(f"❌ EasyOCR failed: {e}, falling back to Tesseract")
-    
-    # Приоритет 2: Tesseract (fallback)
-    if TESSERACT_AVAILABLE:
-        try:
-            print(f"🔍 Using Tesseract for {os.path.basename(image_path)}")
-            
-            img_prep = _preprocess_for_tesseract(img)
-            
-            config = "--oem 3 --psm 6"
-            text = pytesseract.image_to_string(img_prep, lang="rus+eng", config=config)
-            text = _clean_text(text)
-            
-            print(f"✅ Tesseract recognized {len(text)} chars")
-            return text
-            
-        except Exception as e:
-            print(f"❌ Tesseract failed: {e}")
-            return ""
-    
-    # Если ничего не работает
-    print("❌ No OCR engine available!")
-    return ""
+    try:
+        print(f"🔍 Using Tesseract for {os.path.basename(image_path)}")
+        
+        img = Image.open(image_path)
+        img_prep = _preprocess_image(img)
+        
+        # Tesseract конфиг
+        config = "--oem 3 --psm 6"
+        text = pytesseract.image_to_string(img_prep, lang="rus+eng", config=config)
+        
+        # Чистим мусор
+        text = _clean_text(text)
+        
+        print(f"✅ Tesseract recognized {len(text)} chars")
+        return text
+        
+    except Exception as e:
+        print(f"❌ Tesseract failed: {e}")
+        return ""

@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
 Telegram бот "Генератор КП"
-Финальная версия: защита от дублей + OCR + альбомы + исправлены баги с state
+ФИНАЛЬНАЯ ВЕРСИЯ:
+- Защита от дублей + OCR + альбомы
+- Редактирование спецификации (просмотр/изменение/удаление пунктов)
+- Убраны ВСЕ кнопки "Отмена"
 """
 
 import os
@@ -30,6 +33,8 @@ class KPStates(StatesGroup):
     waiting_screenshot = State()
     editing_card = State()
     editing_field = State()
+    viewing_spec = State()
+    editing_spec_item = State()
     waiting_price = State()
     waiting_price_note = State()
     waiting_photos = State()
@@ -85,7 +90,7 @@ def get_main_menu():
     return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
 
 
-def get_edit_card_kb():
+def get_edit_card_kb(spec_count: int = 0):
     """Кнопки редактирования карточки"""
     keyboard = [
         [
@@ -103,14 +108,42 @@ def get_edit_card_kb():
         [
             InlineKeyboardButton(text="📊 Пробег", callback_data="edit_mileage"),
         ],
-        [
-            InlineKeyboardButton(text="📋 Спецификация", callback_data="edit_spec"),
-        ],
+    ]
+    
+    # Кнопка спецификации с количеством
+    if spec_count > 0:
+        keyboard.append([
+            InlineKeyboardButton(text=f"👁️ Спецификация ({spec_count})", callback_data="view_spec")
+        ])
+    else:
+        keyboard.append([
+            InlineKeyboardButton(text="📋 Добавить спецификацию", callback_data="edit_spec")
+        ])
+    
+    keyboard.extend([
         [
             InlineKeyboardButton(text="✅ Всё верно → Указать цену", callback_data="proceed_price"),
         ],
         [
             InlineKeyboardButton(text="🔄 Начать заново", callback_data="reset_start"),
+        ],
+    ])
+    
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+
+def get_spec_view_kb():
+    """Кнопки просмотра спецификации"""
+    keyboard = [
+        [
+            InlineKeyboardButton(text="✏️ Изменить пункт", callback_data="spec_edit_item"),
+            InlineKeyboardButton(text="❌ Удалить пункт", callback_data="spec_delete_item"),
+        ],
+        [
+            InlineKeyboardButton(text="➕ Добавить пункт", callback_data="spec_add_item"),
+        ],
+        [
+            InlineKeyboardButton(text="🔙 Назад к карточке", callback_data="back_to_card"),
         ],
     ]
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
@@ -137,6 +170,7 @@ def get_photos_kb(photos_count: int):
     
     keyboard.extend([
         [InlineKeyboardButton(text="🔄 Сбросить фото", callback_data="reset_photos")],
+        [InlineKeyboardButton(text="🔄 Начать заново", callback_data="reset_start")],
     ])
     
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
@@ -169,18 +203,26 @@ def format_car_card(data: dict, show_price: bool = False) -> str:
         if price:
             lines.append(f"💰 **Цена:** {price:,} руб".replace(',', ' '))
             lines.append(f"📝 **Примечание:** {data.get('price_note', 'с НДС')}")
-        else:
-            lines.append(f"💰 **Цена:** ❓ Будет указана на следующем шаге")
     
     spec_items = data.get('spec_items', [])
     if spec_items:
-        lines.append(f"\n📋 **Спецификация** ({len(spec_items)} пунктов):")
-        for item in spec_items[:5]:
-            lines.append(f"  • {item}")
-        if len(spec_items) > 5:
-            lines.append(f"  ... и ещё {len(spec_items) - 5} пунктов")
+        lines.append(f"\n📋 **Спецификация:** {len(spec_items)} пунктов")
+        lines.append("Нажми \"👁️ Спецификация\" для просмотра")
     else:
         lines.append("\n📋 **Спецификация:** пусто")
+    
+    return "\n".join(lines)
+
+
+def format_spec_list(spec_items: list) -> str:
+    """Форматирует список спецификации с номерами"""
+    if not spec_items:
+        return "📋 Спецификация пуста"
+    
+    lines = [f"📋 **Спецификация ({len(spec_items)} пунктов):**\n"]
+    
+    for i, item in enumerate(spec_items, 1):
+        lines.append(f"{i}. {item}")
     
     return "\n".join(lines)
 
@@ -227,7 +269,6 @@ async def process_album(user_id: int, chat_id: int, state: FSMContext):
         combined_text = "\n\n".join(all_text)
         
         logger.info(f"Combined OCR text length: {len(combined_text)} chars")
-        logger.info(f"First 300 chars: {combined_text[:300]}...")
         
         # Парсим
         parser = CarDescriptionParser()
@@ -239,6 +280,7 @@ async def process_album(user_id: int, chat_id: int, state: FSMContext):
             photos=[]
         )
         
+        spec_count = len(parsed_data.get('spec_items', []))
         card_text = format_car_card(parsed_data, show_price=False)
         
         # Проверяем что пользователь ещё в состоянии ожидания
@@ -247,7 +289,7 @@ async def process_album(user_id: int, chat_id: int, state: FSMContext):
             await bot.send_message(
                 chat_id,
                 f"✅ Обработано {len(photo_paths)} скриншотов!\n\n" + card_text,
-                reply_markup=get_edit_card_kb(),
+                reply_markup=get_edit_card_kb(spec_count),
                 parse_mode="Markdown"
             )
             await state.set_state(KPStates.editing_card)
@@ -389,11 +431,12 @@ async def process_description(message: types.Message, state: FSMContext):
             photos=[]
         )
         
+        spec_count = len(parsed_data.get('spec_items', []))
         card_text = format_car_card(parsed_data, show_price=False)
         
         await message.answer(
             "✅ Описание обработано!\n\n" + card_text,
-            reply_markup=get_edit_card_kb(),
+            reply_markup=get_edit_card_kb(spec_count),
             parse_mode="Markdown"
         )
         await state.set_state(KPStates.editing_card)
@@ -450,7 +493,7 @@ async def handle_edit_field(callback: types.CallbackQuery, state: FSMContext):
         "title": "Введи название автомобиля:",
         "year": "Введи год выпуска (например: 2024):",
         "drive": "Введи привод (Полный/Передний/Задний):",
-        "engine": "Введи описание двигателя (например: 585 л.с., 4.0л, Бензин):",
+        "engine": "Введи описание двигателя (например: 354 л.с., 3л, Бензин):",
         "gearbox": "Введи коробку передач (Автомат/Механика/Робот/Вариатор):",
         "color": "Введи цвет автомобиля:",
         "mileage": "Введи пробег в км (только число, или 0 для нового):",
@@ -497,22 +540,182 @@ async def save_edited_field(message: types.Message, state: FSMContext):
             else:
                 car_data[actual_field] = message.text.strip()
             
-            # КРИТИЧНО: Сохраняем обновлённые данные
             await state.update_data(car_data=car_data)
             
+            spec_count = len(car_data.get('spec_items', []))
             card_text = format_car_card(car_data, show_price=False)
+            
             await message.answer(
                 "✅ Сохранено!\n\n" + card_text,
-                reply_markup=get_edit_card_kb(),
+                reply_markup=get_edit_card_kb(spec_count),
                 parse_mode="Markdown"
             )
             await state.set_state(KPStates.editing_card)
-            logger.info(f"User {message.from_user.id} edited field {field_name}: {car_data.get(actual_field)}")
+            logger.info(f"User {message.from_user.id} edited field {field_name}")
     
     except Exception as e:
         logger.error(f"Error saving field: {e}")
         await message.answer("❌ Ошибка при сохранении. Попробуй ещё раз.")
 
+
+# ==================== СПЕЦИФИКАЦИЯ ====================
+
+@dp.callback_query(F.data == "view_spec")
+async def view_specification(callback: types.CallbackQuery, state: FSMContext):
+    """Просмотр полной спецификации"""
+    data = await state.get_data()
+    car_data = data.get("car_data", {})
+    spec_items = car_data.get('spec_items', [])
+    
+    if not spec_items:
+        await callback.answer("Спецификация пуста!", show_alert=True)
+        return
+    
+    spec_text = format_spec_list(spec_items)
+    
+    await callback.message.answer(
+        spec_text,
+        reply_markup=get_spec_view_kb(),
+        parse_mode="Markdown"
+    )
+    await state.set_state(KPStates.viewing_spec)
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "spec_edit_item")
+async def spec_edit_item_start(callback: types.CallbackQuery, state: FSMContext):
+    """Начало редактирования пункта спецификации"""
+    data = await state.get_data()
+    car_data = data.get("car_data", {})
+    spec_items = car_data.get('spec_items', [])
+    
+    await callback.message.answer(
+        f"Введи номер пункта для редактирования (1-{len(spec_items)}):"
+    )
+    await state.update_data(spec_action="edit")
+    await state.set_state(KPStates.editing_spec_item)
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "spec_delete_item")
+async def spec_delete_item_start(callback: types.CallbackQuery, state: FSMContext):
+    """Начало удаления пункта спецификации"""
+    data = await state.get_data()
+    car_data = data.get("car_data", {})
+    spec_items = car_data.get('spec_items', [])
+    
+    await callback.message.answer(
+        f"Введи номер пункта для удаления (1-{len(spec_items)}):"
+    )
+    await state.update_data(spec_action="delete")
+    await state.set_state(KPStates.editing_spec_item)
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "spec_add_item")
+async def spec_add_item_start(callback: types.CallbackQuery, state: FSMContext):
+    """Добавление нового пункта спецификации"""
+    await callback.message.answer("Введи новый пункт спецификации:")
+    await state.update_data(spec_action="add")
+    await state.set_state(KPStates.editing_spec_item)
+    await callback.answer()
+
+
+@dp.message(KPStates.editing_spec_item, F.text)
+async def process_spec_edit(message: types.Message, state: FSMContext):
+    """Обработка редактирования спецификации"""
+    try:
+        data = await state.get_data()
+        car_data = data.get("car_data", {})
+        spec_items = car_data.get('spec_items', [])
+        spec_action = data.get("spec_action")
+        
+        if spec_action == "add":
+            # Добавление нового пункта
+            new_item = message.text.strip()
+            spec_items.append(new_item)
+            car_data['spec_items'] = spec_items
+            await state.update_data(car_data=car_data)
+            
+            await message.answer(
+                f"✅ Пункт добавлен!\n\n" + format_spec_list(spec_items),
+                reply_markup=get_spec_view_kb(),
+                parse_mode="Markdown"
+            )
+            await state.set_state(KPStates.viewing_spec)
+            
+        elif spec_action in ["edit", "delete"]:
+            # Получаем номер пункта
+            try:
+                item_num = int(message.text.strip())
+                if item_num < 1 or item_num > len(spec_items):
+                    await message.answer(f"⚠️ Номер должен быть от 1 до {len(spec_items)}")
+                    return
+                
+                if spec_action == "delete":
+                    # Удаление
+                    deleted_item = spec_items.pop(item_num - 1)
+                    car_data['spec_items'] = spec_items
+                    await state.update_data(car_data=car_data)
+                    
+                    await message.answer(
+                        f"✅ Удалено: {deleted_item}\n\n" + format_spec_list(spec_items),
+                        reply_markup=get_spec_view_kb(),
+                        parse_mode="Markdown"
+                    )
+                    await state.set_state(KPStates.viewing_spec)
+                    
+                elif spec_action == "edit":
+                    # Запрашиваем новое значение
+                    await state.update_data(spec_edit_index=item_num - 1)
+                    await message.answer(
+                        f"Текущее значение:\n{spec_items[item_num - 1]}\n\n"
+                        "Введи новое значение:"
+                    )
+                    await state.update_data(spec_action="edit_value")
+                    
+            except ValueError:
+                await message.answer("⚠️ Введи номер пункта (число)")
+                
+        elif spec_action == "edit_value":
+            # Сохраняем отредактированное значение
+            edit_index = data.get("spec_edit_index")
+            new_value = message.text.strip()
+            spec_items[edit_index] = new_value
+            car_data['spec_items'] = spec_items
+            await state.update_data(car_data=car_data)
+            
+            await message.answer(
+                f"✅ Пункт изменён!\n\n" + format_spec_list(spec_items),
+                reply_markup=get_spec_view_kb(),
+                parse_mode="Markdown"
+            )
+            await state.set_state(KPStates.viewing_spec)
+    
+    except Exception as e:
+        logger.error(f"Error editing spec: {e}")
+        await message.answer("❌ Ошибка. Попробуй ещё раз.")
+
+
+@dp.callback_query(F.data == "back_to_card")
+async def back_to_card(callback: types.CallbackQuery, state: FSMContext):
+    """Возврат к карточке"""
+    data = await state.get_data()
+    car_data = data.get("car_data", {})
+    spec_count = len(car_data.get('spec_items', []))
+    
+    card_text = format_car_card(car_data, show_price=False)
+    
+    await callback.message.answer(
+        card_text,
+        reply_markup=get_edit_card_kb(spec_count),
+        parse_mode="Markdown"
+    )
+    await state.set_state(KPStates.editing_card)
+    await callback.answer()
+
+
+# ==================== ЦЕНА И ФОТО ====================
 
 @dp.callback_query(F.data == "proceed_price")
 async def proceed_to_price(callback: types.CallbackQuery, state: FSMContext):
@@ -540,8 +743,6 @@ async def process_price(message: types.Message, state: FSMContext):
         data = await state.get_data()
         car_data = data.get("car_data", {})
         car_data['price_rub'] = price
-        
-        # КРИТИЧНО: Сохраняем car_data с ценой
         await state.update_data(car_data=car_data)
         
         await message.answer(
@@ -551,7 +752,6 @@ async def process_price(message: types.Message, state: FSMContext):
             parse_mode="Markdown"
         )
         await state.set_state(KPStates.waiting_price_note)
-        logger.info(f"User {message.from_user.id} set price: {price}")
         
     except ValueError:
         await message.answer("⚠️ Введи только число (например: 5000000)")
@@ -571,8 +771,6 @@ async def process_price_note(callback: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
     car_data = data.get("car_data", {})
     car_data['price_note'] = price_notes.get(price_type, "с НДС")
-    
-    # КРИТИЧНО: Сохраняем car_data с типом цены
     await state.update_data(car_data=car_data)
     
     await callback.message.answer(
@@ -593,7 +791,6 @@ async def process_price_note(callback: types.CallbackQuery, state: FSMContext):
     )
     
     await state.set_state(KPStates.waiting_photos)
-    logger.info(f"User {callback.from_user.id} set price note: {car_data['price_note']}")
     await callback.answer()
 
 
@@ -632,17 +829,15 @@ async def finalize_kp(callback: types.CallbackQuery, state: FSMContext):
     photos = data.get("photos", [])
     car_data = data.get("car_data", {})
     
-    # ОТЛАДКА: Логируем car_data перед созданием PDF
     logger.info(f"Creating PDF with car_data: {car_data}")
     
     if len(photos) < 3:
         await callback.answer("⚠️ Нужно минимум 3 фото!", show_alert=True)
         return
     
-    # Проверка что car_data не пустая
     if not car_data or not car_data.get('price_rub'):
-        await callback.answer("⚠️ Ошибка: данные автомобиля потеряны. Начни заново.", show_alert=True)
-        logger.error(f"car_data is empty or missing price: {car_data}")
+        await callback.answer("⚠️ Ошибка: данные потеряны. Начни заново.", show_alert=True)
+        logger.error(f"car_data is empty: {car_data}")
         return
     
     await callback.message.answer("⏳ Создаю PDF... Подожди немного.")
@@ -682,7 +877,7 @@ async def finalize_kp(callback: types.CallbackQuery, state: FSMContext):
             reply_markup=get_main_menu()
         )
         
-        logger.info(f"User {callback.from_user.id} created KP successfully: {car_data.get('title')}")
+        logger.info(f"User {callback.from_user.id} created KP: {car_data.get('title')}")
         await state.clear()
         await callback.answer("Готово! ✅")
         
@@ -713,7 +908,6 @@ async def reset_start_handler(callback: types.CallbackQuery, state: FSMContext):
         reply_markup=get_main_menu()
     )
     await callback.answer()
-    logger.info(f"User {callback.from_user.id} reset to start")
 
 
 @dp.message(F.text == "ℹ️ Помощь")
@@ -722,14 +916,14 @@ async def help_command(message: types.Message):
     help_text = (
         "📖 **Как создать КП:**\n\n"
         "**📝 Режим \"Текст\":**\n"
-        "1. Скопируй описание с Авито (Ctrl+A, Ctrl+C)\n"
+        "1. Скопируй описание с Авито\n"
         "2. Вставь в бота\n"
         "3. Проверь данные\n"
         "4. Укажи цену\n"
         "5. Загрузи фото\n\n"
         "**📸 Режим \"Скриншот\":**\n"
-        "1. Сделай скриншоты характеристик\n"
-        "2. Отправь все фото боту\n"
+        "1. Сделай скриншоты\n"
+        "2. Отправь боту\n"
         "3. Проверь данные\n"
         "4. Укажи цену\n"
         "5. Загрузи фото\n\n"
@@ -743,7 +937,6 @@ async def unknown_message(message: types.Message, state: FSMContext):
     """Обработка неизвестных сообщений"""
     current_state = await state.get_state()
     
-    # Если в процессе создания КП - игнорируем
     if current_state:
         return
     
@@ -760,9 +953,7 @@ async def on_startup():
     """При запуске бота"""
     logger.info("=" * 50)
     logger.info("Бот запущен!")
-    logger.info(f"Whitelist enabled: {bool(ALLOWED_USERS)}")
-    if ALLOWED_USERS:
-        logger.info(f"Allowed users: {ALLOWED_USERS}")
+    logger.info(f"Whitelist: {bool(ALLOWED_USERS)}")
     logger.info("=" * 50)
 
 
@@ -775,7 +966,6 @@ async def main():
     """Главная функция"""
     dp.startup.register(on_startup)
     dp.shutdown.register(on_shutdown)
-    
     await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
 
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Telegram бот "Генератор КП"
-Финальная версия: защита от дублей + OCR + поддержка альбомов
+Финальная версия: защита от дублей + OCR + альбомы + исправлены баги с state
 """
 
 import os
@@ -112,9 +112,6 @@ def get_edit_card_kb():
         [
             InlineKeyboardButton(text="🔄 Начать заново", callback_data="reset_start"),
         ],
-        [
-            InlineKeyboardButton(text="❌ Отмена", callback_data="cancel"),
-        ],
     ]
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
@@ -140,7 +137,6 @@ def get_photos_kb(photos_count: int):
     
     keyboard.extend([
         [InlineKeyboardButton(text="🔄 Сбросить фото", callback_data="reset_photos")],
-        [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel")],
     ])
     
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
@@ -193,7 +189,7 @@ def format_car_card(data: dict, show_price: bool = False) -> str:
 
 async def process_album(user_id: int, chat_id: int, state: FSMContext):
     """Обрабатывает накопленные фото после задержки"""
-    await asyncio.sleep(1.0)  # Ждём 1 секунду после последнего фото
+    await asyncio.sleep(1.0)
     
     if user_id not in album_storage:
         return
@@ -439,7 +435,7 @@ async def process_screenshot(message: types.Message, state: FSMContext):
     photo_count = len(album_storage[user_id]['photos'])
     await message.answer(f"📸 Получено {photo_count} фото... (ожидаю остальные)")
     
-    # Запускаем новый таймер (обработка через 1 сек после последнего фото)
+    # Запускаем новый таймер
     album_storage[user_id]['timer'] = asyncio.create_task(
         process_album(user_id, chat_id, state)
     )
@@ -501,6 +497,7 @@ async def save_edited_field(message: types.Message, state: FSMContext):
             else:
                 car_data[actual_field] = message.text.strip()
             
+            # КРИТИЧНО: Сохраняем обновлённые данные
             await state.update_data(car_data=car_data)
             
             card_text = format_car_card(car_data, show_price=False)
@@ -510,7 +507,7 @@ async def save_edited_field(message: types.Message, state: FSMContext):
                 parse_mode="Markdown"
             )
             await state.set_state(KPStates.editing_card)
-            logger.info(f"User {message.from_user.id} edited field {field_name}")
+            logger.info(f"User {message.from_user.id} edited field {field_name}: {car_data.get(actual_field)}")
     
     except Exception as e:
         logger.error(f"Error saving field: {e}")
@@ -543,6 +540,8 @@ async def process_price(message: types.Message, state: FSMContext):
         data = await state.get_data()
         car_data = data.get("car_data", {})
         car_data['price_rub'] = price
+        
+        # КРИТИЧНО: Сохраняем car_data с ценой
         await state.update_data(car_data=car_data)
         
         await message.answer(
@@ -552,6 +551,7 @@ async def process_price(message: types.Message, state: FSMContext):
             parse_mode="Markdown"
         )
         await state.set_state(KPStates.waiting_price_note)
+        logger.info(f"User {message.from_user.id} set price: {price}")
         
     except ValueError:
         await message.answer("⚠️ Введи только число (например: 5000000)")
@@ -571,6 +571,8 @@ async def process_price_note(callback: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
     car_data = data.get("car_data", {})
     car_data['price_note'] = price_notes.get(price_type, "с НДС")
+    
+    # КРИТИЧНО: Сохраняем car_data с типом цены
     await state.update_data(car_data=car_data)
     
     await callback.message.answer(
@@ -591,6 +593,7 @@ async def process_price_note(callback: types.CallbackQuery, state: FSMContext):
     )
     
     await state.set_state(KPStates.waiting_photos)
+    logger.info(f"User {callback.from_user.id} set price note: {car_data['price_note']}")
     await callback.answer()
 
 
@@ -629,8 +632,17 @@ async def finalize_kp(callback: types.CallbackQuery, state: FSMContext):
     photos = data.get("photos", [])
     car_data = data.get("car_data", {})
     
+    # ОТЛАДКА: Логируем car_data перед созданием PDF
+    logger.info(f"Creating PDF with car_data: {car_data}")
+    
     if len(photos) < 3:
         await callback.answer("⚠️ Нужно минимум 3 фото!", show_alert=True)
+        return
+    
+    # Проверка что car_data не пустая
+    if not car_data or not car_data.get('price_rub'):
+        await callback.answer("⚠️ Ошибка: данные автомобиля потеряны. Начни заново.", show_alert=True)
+        logger.error(f"car_data is empty or missing price: {car_data}")
         return
     
     await callback.message.answer("⏳ Создаю PDF... Подожди немного.")
@@ -670,12 +682,12 @@ async def finalize_kp(callback: types.CallbackQuery, state: FSMContext):
             reply_markup=get_main_menu()
         )
         
-        logger.info(f"User {callback.from_user.id} created KP successfully")
+        logger.info(f"User {callback.from_user.id} created KP successfully: {car_data.get('title')}")
         await state.clear()
         await callback.answer("Готово! ✅")
         
     except Exception as e:
-        logger.error(f"Error creating PDF: {e}")
+        logger.error(f"Error creating PDF: {e}", exc_info=True)
         await callback.message.answer(
             "❌ Ошибка при создании PDF. Попробуй ещё раз.",
             reply_markup=get_main_menu()
@@ -701,18 +713,7 @@ async def reset_start_handler(callback: types.CallbackQuery, state: FSMContext):
         reply_markup=get_main_menu()
     )
     await callback.answer()
-
-
-@dp.callback_query(F.data == "cancel")
-async def cancel_handler(callback: types.CallbackQuery, state: FSMContext):
-    """Отмена"""
-    await state.clear()
-    await callback.message.answer(
-        "❌ Действие отменено.",
-        reply_markup=get_main_menu()
-    )
-    await callback.answer()
-    logger.info(f"User {callback.from_user.id} cancelled action")
+    logger.info(f"User {callback.from_user.id} reset to start")
 
 
 @dp.message(F.text == "ℹ️ Помощь")

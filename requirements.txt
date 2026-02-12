@@ -16,6 +16,7 @@ reportlab==4.2.5
 # Дополнительные зависимости
 aiohttp==3.10.11
 aiofiles==24.1.0
-# OCR (локальный Tesseract)
+
+# OCR (Tesseract)
 pytesseract==0.3.10
-opencv-python-headless==4.*
+opencv-python-headless==4.10.0.84

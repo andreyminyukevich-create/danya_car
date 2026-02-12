@@ -1,20 +1,41 @@
+# Используем официальный Python 3.11
 FROM python:3.11-slim
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# Устанавливаем системные зависимости
+RUN apt-get update && apt-get install -y \
+    # Tesseract OCR
     tesseract-ocr \
     tesseract-ocr-rus \
     tesseract-ocr-eng \
+    # Для OpenCV
+    libgl1-mesa-glx \
     libglib2.0-0 \
     libsm6 \
-    libxrender1 \
     libxext6 \
-  && rm -rf /var/lib/apt/lists/*
+    libxrender-dev \
+    # Утилиты
+    wget \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
 
+# Создаём рабочую директорию
 WORKDIR /app
 
-COPY requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir -r /app/requirements.txt
+# Копируем requirements.txt
+COPY requirements.txt .
 
-COPY . /app
+# Устанавливаем Python зависимости
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
 
+# Копируем все файлы проекта
+COPY . .
+
+# Создаём директорию для временных файлов
+RUN mkdir -p /tmp
+
+# Проверяем установку Tesseract
+RUN tesseract --version
+
+# Запускаем бота
 CMD ["python", "bot.py"]

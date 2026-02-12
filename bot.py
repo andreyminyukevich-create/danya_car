@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Telegram бот "Генератор КП"
-Версия с защитой от повторных сообщений
+Версия с OCR (скриншоты)
 """
 
 import os
@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 # Состояния FSM
 class KPStates(StatesGroup):
     waiting_description = State()
+    waiting_screenshot = State()
     editing_card = State()
     editing_field = State()
     waiting_price = State()
@@ -44,33 +45,22 @@ storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
 # Защита от дублей сообщений
-last_message_tracker = {}  # {user_id: {'text': str, 'time': float}}
-DUPLICATE_TIMEOUT = 2.0  # секунды
+last_message_tracker = {}
+DUPLICATE_TIMEOUT = 2.0
 
 
 def is_duplicate_message(user_id: int, text: str) -> bool:
-    """
-    Проверяет, является ли сообщение дублем
-    
-    Args:
-        user_id: ID пользователя
-        text: Текст сообщения
-    
-    Returns:
-        True если дубль, False если нет
-    """
+    """Проверяет, является ли сообщение дублем"""
     current_time = time.time()
     
     if user_id in last_message_tracker:
         last_data = last_message_tracker[user_id]
         time_diff = current_time - last_data['time']
         
-        # Если то же сообщение пришло за 2 секунды - это дубль
         if time_diff < DUPLICATE_TIMEOUT and last_data['text'] == text:
             logger.info(f"Duplicate message detected from user {user_id}")
             return True
     
-    # Сохраняем текущее сообщение
     last_message_tracker[user_id] = {
         'text': text,
         'time': current_time
@@ -84,7 +74,8 @@ def is_duplicate_message(user_id: int, text: str) -> bool:
 def get_main_menu():
     """Главное меню"""
     keyboard = [
-        [KeyboardButton(text="📝 Создать КП")],
+        [KeyboardButton(text="📝 Создать КП (текст)")],
+        [KeyboardButton(text="📸 Создать КП (скриншот)")],
         [KeyboardButton(text="📖 Инструкция"), KeyboardButton(text="ℹ️ Помощь")],
     ]
     return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
@@ -115,7 +106,7 @@ def get_edit_card_kb():
             InlineKeyboardButton(text="✅ Всё верно → Указать цену", callback_data="proceed_price"),
         ],
         [
-            InlineKeyboardButton(text="🔄 Вставить описание заново", callback_data="reset_description"),
+            InlineKeyboardButton(text="🔄 Начать заново", callback_data="reset_start"),
         ],
         [
             InlineKeyboardButton(text="❌ Отмена", callback_data="cancel"),
@@ -211,19 +202,23 @@ async def cmd_start(message: types.Message, state: FSMContext):
     await message.answer(
         f"Привет, {message.from_user.first_name}! 👋\n\n"
         "Я помогу создать коммерческое предложение (КП) для автомобиля.\n\n"
-        "Выбери действие:",
+        "**Два способа работы:**\n"
+        "📝 **Текст** - скопируй и вставь описание\n"
+        "📸 **Скриншот** - сделай фото характеристик\n\n"
+        "Выбери способ:",
+        parse_mode="Markdown",
         reply_markup=get_main_menu()
     )
     logger.info(f"User {user_id} started bot")
 
 
-@dp.message(F.text == "📝 Создать КП")
-async def start_create_kp(message: types.Message, state: FSMContext):
-    """Начало создания КП"""
+@dp.message(F.text == "📝 Создать КП (текст)")
+async def start_create_kp_text(message: types.Message, state: FSMContext):
+    """Начало создания КП через текст"""
     await state.clear()
     
     await message.answer(
-        "📋 Отлично! Давай создадим КП.\n\n"
+        "📋 Отлично! Создадим КП через текст.\n\n"
         "**Шаг 1 из 3:** Отправь мне описание автомобиля.\n\n"
         "💡 **Как скопировать с Авито:**\n"
         "1. Открой объявление на Авито\n"
@@ -235,36 +230,61 @@ async def start_create_kp(message: types.Message, state: FSMContext):
         reply_markup=types.ReplyKeyboardRemove()
     )
     await state.set_state(KPStates.waiting_description)
-    logger.info(f"User {message.from_user.id} started creating KP")
+    logger.info(f"User {message.from_user.id} started creating KP (text mode)")
+
+
+@dp.message(F.text == "📸 Создать КП (скриншот)")
+async def start_create_kp_screenshot(message: types.Message, state: FSMContext):
+    """Начало создания КП через скриншот"""
+    await state.clear()
+    
+    await message.answer(
+        "📸 Отлично! Создадим КП через скриншот.\n\n"
+        "**Шаг 1 из 3:** Отправь скриншот характеристик.\n\n"
+        "💡 **Как сделать скриншот:**\n"
+        "1. Открой объявление на Авито\n"
+        "2. Сделай скриншот блока **\"Характеристики\"**\n"
+        "   (включи: название, год, пробег, двигатель, цвет, и т.д.)\n"
+        "3. Отправь фото сюда\n\n"
+        "✨ Бот распознает текст с фото автоматически!",
+        parse_mode="Markdown",
+        reply_markup=types.ReplyKeyboardRemove()
+    )
+    await state.set_state(KPStates.waiting_screenshot)
+    logger.info(f"User {message.from_user.id} started creating KP (screenshot mode)")
 
 
 @dp.message(F.text == "📖 Инструкция")
 async def show_instruction(message: types.Message):
     """Показывает инструкцию"""
-    instruction = """📖 **ИНСТРУКЦИЯ: Как скопировать объявление с Авито**
+    instruction = """📖 **ИНСТРУКЦИЯ**
 
-**Способ 1: Копировать всю страницу (рекомендуется)**
+**📝 Режим "Текст":**
 
-1️⃣ Открой объявление на Авито в браузере
+1️⃣ Открой объявление на Авито
 2️⃣ Нажми **Ctrl+A** (Windows) или **Cmd+A** (Mac)
 3️⃣ Нажми **Ctrl+C** (Windows) или **Cmd+C** (Mac)
-4️⃣ Вернись в бота и нажми **Ctrl+V** (Windows) или **Cmd+V** (Mac)
+4️⃣ Вставь в бота
 
-✅ **Бот автоматически найдёт:**
-- Название, год, характеристики
-- Цвет, пробег, спецификацию
-- И многое другое!
+**📸 Режим "Скриншот":**
 
-⚠️ **Не переживай если скопируется "мусор"** - бот сам всё отфильтрует!
+1️⃣ Открой объявление на Авито
+2️⃣ Сделай скриншот блока "Характеристики"
+3️⃣ Отправь фото боту
 
-💡 **Совет:** После вставки проверь карточку и отредактируй любые поля если нужно!"""
+✅ **Бот найдёт:**
+- Название, год, пробег
+- Двигатель, привод, коробку
+- Цвет, спецификацию
+
+💡 Можешь отредактировать любые поля!"""
     
     await message.answer(instruction, parse_mode="Markdown")
 
 
 @dp.message(KPStates.waiting_description, F.text)
 async def process_description(message: types.Message, state: FSMContext):
-    """Обработка описания"""
+    """Обработка описания (текстовый режим)"""
     
     # Проверка на дубль
     if is_duplicate_message(message.from_user.id, message.text):
@@ -296,6 +316,58 @@ async def process_description(message: types.Message, state: FSMContext):
         logger.error(f"Error parsing description: {e}")
         await message.answer(
             "❌ Ошибка при обработке описания. Попробуй ещё раз.",
+            reply_markup=get_main_menu()
+        )
+        await state.clear()
+
+
+@dp.message(KPStates.waiting_screenshot, F.photo)
+async def process_screenshot(message: types.Message, state: FSMContext):
+    """Обработка скриншота (OCR режим)"""
+    
+    try:
+        await message.answer("⏳ Распознаю текст с фото... Подожди немного.")
+        
+        # Скачиваем фото
+        photo = message.photo[-1]
+        file = await bot.get_file(photo.file_id)
+        photo_path = f"/tmp/screenshot_{message.from_user.id}.jpg"
+        await bot.download_file(file.file_path, photo_path)
+        
+        # OCR распознавание
+        from ocr_service import ocr_image_to_text
+        recognized_text = ocr_image_to_text(photo_path)
+        
+        logger.info(f"OCR recognized text: {recognized_text[:200]}...")
+        
+        # Парсим распознанный текст
+        parser = CarDescriptionParser()
+        parsed_data = parser.parse(recognized_text)
+        
+        await state.update_data(
+            description_text=recognized_text,
+            car_data=parsed_data,
+            photos=[]
+        )
+        
+        card_text = format_car_card(parsed_data, show_price=False)
+        
+        await message.answer(
+            "✅ Скриншот обработан!\n\n" + card_text,
+            reply_markup=get_edit_card_kb(),
+            parse_mode="Markdown"
+        )
+        await state.set_state(KPStates.editing_card)
+        logger.info(f"User {message.from_user.id} processed screenshot successfully")
+        
+    except Exception as e:
+        logger.error(f"Error processing screenshot: {e}")
+        await message.answer(
+            "❌ Ошибка при распознавании. Попробуй:\n"
+            "• Сделать скриншот чётче\n"
+            "• Увеличить текст на экране\n"
+            "• Отправить скриншот заново\n\n"
+            "Или используй режим \"Текст\".",
             reply_markup=get_main_menu()
         )
         await state.clear()
@@ -548,11 +620,14 @@ async def reset_photos_handler(callback: types.CallbackQuery, state: FSMContext)
     await callback.answer()
 
 
-@dp.callback_query(F.data == "reset_description")
-async def reset_description_handler(callback: types.CallbackQuery, state: FSMContext):
-    """Повторный ввод описания"""
-    await callback.message.answer("🔄 Вставь описание заново:")
-    await state.set_state(KPStates.waiting_description)
+@dp.callback_query(F.data == "reset_start")
+async def reset_start_handler(callback: types.CallbackQuery, state: FSMContext):
+    """Начать заново"""
+    await state.clear()
+    await callback.message.answer(
+        "🔄 Начинаем заново. Выбери способ:",
+        reply_markup=get_main_menu()
+    )
     await callback.answer()
 
 
@@ -573,20 +648,19 @@ async def help_command(message: types.Message):
     """Справка"""
     help_text = (
         "📖 **Как создать КП:**\n\n"
-        "1️⃣ Нажми **\"Создать КП\"**\n"
-        "2️⃣ Вставь описание автомобиля (всю страницу с Авито!)\n"
-        "3️⃣ Проверь и отредактируй данные\n"
-        "4️⃣ Укажи цену\n"
-        "5️⃣ Загрузи 3-4 фото\n"
-        "6️⃣ Получи готовый PDF\n\n"
-        "✨ **Бот автоматически распознает:**\n"
-        "• Марку и модель\n"
-        "• Год выпуска и пробег\n"
-        "• Двигатель и мощность\n"
-        "• Привод и коробку\n"
-        "• Цвет\n"
-        "• Технические характеристики\n\n"
-        "💡 Нажми **\"📖 Инструкция\"** для подробной инструкции!"
+        "**📝 Режим \"Текст\":**\n"
+        "1. Скопируй описание с Авито (Ctrl+A, Ctrl+C)\n"
+        "2. Вставь в бота\n"
+        "3. Проверь данные\n"
+        "4. Укажи цену\n"
+        "5. Загрузи фото\n\n"
+        "**📸 Режим \"Скриншот\":**\n"
+        "1. Сделай скриншот характеристик\n"
+        "2. Отправь фото боту\n"
+        "3. Проверь данные\n"
+        "4. Укажи цену\n"
+        "5. Загрузи фото\n\n"
+        "✨ **Бот распознает всё автоматически!**"
     )
     await message.answer(help_text, parse_mode="Markdown")
 

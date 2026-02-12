@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
 Telegram бот "Генератор КП"
-Версия с OCR (скриншоты)
+Финальная версия: защита от дублей + OCR + поддержка альбомов
 """
 
 import os
 import logging
 import time
+import asyncio
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
@@ -47,6 +48,9 @@ dp = Dispatcher(storage=storage)
 # Защита от дублей сообщений
 last_message_tracker = {}
 DUPLICATE_TIMEOUT = 2.0
+
+# Хранилище для альбомов
+album_storage = {}
 
 
 def is_duplicate_message(user_id: int, text: str) -> bool:
@@ -185,6 +189,88 @@ def format_car_card(data: dict, show_price: bool = False) -> str:
     return "\n".join(lines)
 
 
+# ==================== ОБРАБОТКА АЛЬБОМОВ ====================
+
+async def process_album(user_id: int, chat_id: int, state: FSMContext):
+    """Обрабатывает накопленные фото после задержки"""
+    await asyncio.sleep(1.0)  # Ждём 1 секунду после последнего фото
+    
+    if user_id not in album_storage:
+        return
+    
+    photos = album_storage[user_id]['photos']
+    del album_storage[user_id]
+    
+    if not photos:
+        return
+    
+    try:
+        # Скачиваем все фото
+        photo_paths = []
+        for i, photo_id in enumerate(photos):
+            file = await bot.get_file(photo_id)
+            photo_path = f"/tmp/screenshot_{user_id}_{i}.jpg"
+            await bot.download_file(file.file_path, photo_path)
+            photo_paths.append(photo_path)
+        
+        logger.info(f"Processing {len(photo_paths)} screenshots for user {user_id}")
+        
+        # OCR на всех фото
+        from ocr_service import ocr_image_to_text
+        
+        all_text = []
+        for i, photo_path in enumerate(photo_paths):
+            try:
+                text = ocr_image_to_text(photo_path)
+                all_text.append(text)
+                logger.info(f"OCR photo {i+1}/{len(photo_paths)}: {len(text)} chars")
+            except Exception as e:
+                logger.error(f"OCR error on photo {i+1}: {e}")
+        
+        # Объединяем весь текст
+        combined_text = "\n\n".join(all_text)
+        
+        logger.info(f"Combined OCR text length: {len(combined_text)} chars")
+        logger.info(f"First 300 chars: {combined_text[:300]}...")
+        
+        # Парсим
+        parser = CarDescriptionParser()
+        parsed_data = parser.parse(combined_text)
+        
+        await state.update_data(
+            description_text=combined_text,
+            car_data=parsed_data,
+            photos=[]
+        )
+        
+        card_text = format_car_card(parsed_data, show_price=False)
+        
+        # Проверяем что пользователь ещё в состоянии ожидания
+        current_state = await state.get_state()
+        if current_state == KPStates.waiting_screenshot:
+            await bot.send_message(
+                chat_id,
+                f"✅ Обработано {len(photo_paths)} скриншотов!\n\n" + card_text,
+                reply_markup=get_edit_card_kb(),
+                parse_mode="Markdown"
+            )
+            await state.set_state(KPStates.editing_card)
+            logger.info(f"User {user_id} processed {len(photo_paths)} screenshots successfully")
+        
+    except Exception as e:
+        logger.error(f"Error processing album: {e}", exc_info=True)
+        await bot.send_message(
+            chat_id,
+            "❌ Ошибка при распознавании. Попробуй:\n"
+            "• Сделать скриншоты чётче\n"
+            "• Увеличить текст на экране\n"
+            "• Отправить заново\n\n"
+            "Или используй режим \"Текст\".",
+            reply_markup=get_main_menu()
+        )
+        await state.clear()
+
+
 # ==================== ХЕНДЛЕРЫ ====================
 
 @dp.message(Command("start"))
@@ -240,13 +326,15 @@ async def start_create_kp_screenshot(message: types.Message, state: FSMContext):
     
     await message.answer(
         "📸 Отлично! Создадим КП через скриншот.\n\n"
-        "**Шаг 1 из 3:** Отправь скриншот характеристик.\n\n"
-        "💡 **Как сделать скриншот:**\n"
+        "**Шаг 1 из 3:** Отправь скриншоты характеристик.\n\n"
+        "💡 **Как сделать:**\n"
         "1. Открой объявление на Авито\n"
-        "2. Сделай скриншот блока **\"Характеристики\"**\n"
-        "   (включи: название, год, пробег, двигатель, цвет, и т.д.)\n"
-        "3. Отправь фото сюда\n\n"
-        "✨ Бот распознает текст с фото автоматически!",
+        "2. Сделай скриншоты:\n"
+        "   • Название, год, цена, пробег\n"
+        "   • Характеристики (двигатель, привод, КПП)\n"
+        "   • Цвет и дополнительная информация\n"
+        "3. Отправь все фото сюда (можно альбомом)\n\n"
+        "✨ Бот распознает текст и соберёт всю информацию!",
         parse_mode="Markdown",
         reply_markup=types.ReplyKeyboardRemove()
     )
@@ -269,8 +357,11 @@ async def show_instruction(message: types.Message):
 **📸 Режим "Скриншот":**
 
 1️⃣ Открой объявление на Авито
-2️⃣ Сделай скриншот блока "Характеристики"
-3️⃣ Отправь фото боту
+2️⃣ Сделай несколько скриншотов:
+   • Название, год, цена
+   • Характеристики (двигатель, КПП, привод)
+   • Цвет, пробег
+3️⃣ Отправь все фото боту (можно альбомом)
 
 ✅ **Бот найдёт:**
 - Название, год, пробег
@@ -323,54 +414,35 @@ async def process_description(message: types.Message, state: FSMContext):
 
 @dp.message(KPStates.waiting_screenshot, F.photo)
 async def process_screenshot(message: types.Message, state: FSMContext):
-    """Обработка скриншота (OCR режим)"""
+    """Обработка скриншотов (OCR режим) с поддержкой альбомов"""
     
-    try:
-        await message.answer("⏳ Распознаю текст с фото... Подожди немного.")
-        
-        # Скачиваем фото
-        photo = message.photo[-1]
-        file = await bot.get_file(photo.file_id)
-        photo_path = f"/tmp/screenshot_{message.from_user.id}.jpg"
-        await bot.download_file(file.file_path, photo_path)
-        
-        # OCR распознавание
-        from ocr_service import ocr_image_to_text
-        recognized_text = ocr_image_to_text(photo_path)
-        
-        logger.info(f"OCR recognized text: {recognized_text[:200]}...")
-        
-        # Парсим распознанный текст
-        parser = CarDescriptionParser()
-        parsed_data = parser.parse(recognized_text)
-        
-        await state.update_data(
-            description_text=recognized_text,
-            car_data=parsed_data,
-            photos=[]
-        )
-        
-        card_text = format_car_card(parsed_data, show_price=False)
-        
-        await message.answer(
-            "✅ Скриншот обработан!\n\n" + card_text,
-            reply_markup=get_edit_card_kb(),
-            parse_mode="Markdown"
-        )
-        await state.set_state(KPStates.editing_card)
-        logger.info(f"User {message.from_user.id} processed screenshot successfully")
-        
-    except Exception as e:
-        logger.error(f"Error processing screenshot: {e}")
-        await message.answer(
-            "❌ Ошибка при распознавании. Попробуй:\n"
-            "• Сделать скриншот чётче\n"
-            "• Увеличить текст на экране\n"
-            "• Отправить скриншот заново\n\n"
-            "Или используй режим \"Текст\".",
-            reply_markup=get_main_menu()
-        )
-        await state.clear()
+    user_id = message.from_user.id
+    chat_id = message.chat.id
+    photo_id = message.photo[-1].file_id
+    
+    # Инициализируем хранилище для пользователя
+    if user_id not in album_storage:
+        album_storage[user_id] = {
+            'photos': [],
+            'timer': None,
+            'chat_id': chat_id
+        }
+    
+    # Добавляем фото
+    album_storage[user_id]['photos'].append(photo_id)
+    
+    # Отменяем старый таймер
+    if album_storage[user_id]['timer']:
+        album_storage[user_id]['timer'].cancel()
+    
+    # Отправляем статус
+    photo_count = len(album_storage[user_id]['photos'])
+    await message.answer(f"📸 Получено {photo_count} фото... (ожидаю остальные)")
+    
+    # Запускаем новый таймер (обработка через 1 сек после последнего фото)
+    album_storage[user_id]['timer'] = asyncio.create_task(
+        process_album(user_id, chat_id, state)
+    )
 
 
 @dp.callback_query(F.data.startswith("edit_"))
@@ -655,8 +727,8 @@ async def help_command(message: types.Message):
         "4. Укажи цену\n"
         "5. Загрузи фото\n\n"
         "**📸 Режим \"Скриншот\":**\n"
-        "1. Сделай скриншот характеристик\n"
-        "2. Отправь фото боту\n"
+        "1. Сделай скриншоты характеристик\n"
+        "2. Отправь все фото боту\n"
         "3. Проверь данные\n"
         "4. Укажи цену\n"
         "5. Загрузи фото\n\n"
@@ -707,7 +779,6 @@ async def main():
 
 
 if __name__ == "__main__":
-    import asyncio
     try:
         asyncio.run(main())
     except KeyboardInterrupt:

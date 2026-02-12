@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """
 Telegram бот "Генератор КП"
-ФИНАЛЬНАЯ ВЕРСИЯ:
-- Защита от дублей + OCR + альбомы
-- Редактирование спецификации (просмотр/изменение/удаление пунктов)
-- Убраны ВСЕ кнопки "Отмена"
+ФИНАЛЬНАЯ ВЕРСИЯ: EasyOCR + улучшенный парсер + редактирование спецификации
 """
 
 import os
@@ -215,11 +212,11 @@ def format_car_card(data: dict, show_price: bool = False) -> str:
 
 
 def format_spec_list(spec_items: list) -> str:
-    """Форматирует список спецификации с номерами"""
+    """Форматирует список спецификации с номерами (БЕЗ Markdown!)"""
     if not spec_items:
         return "📋 Спецификация пуста"
     
-    lines = [f"📋 **Спецификация ({len(spec_items)} пунктов):**\n"]
+    lines = [f"📋 Спецификация ({len(spec_items)} пунктов):\n"]
     
     for i, item in enumerate(spec_items, 1):
         lines.append(f"{i}. {item}")
@@ -573,10 +570,10 @@ async def view_specification(callback: types.CallbackQuery, state: FSMContext):
     
     spec_text = format_spec_list(spec_items)
     
+    # КРИТИЧНО: БЕЗ parse_mode! Иначе краш на символах * _ [ ]
     await callback.message.answer(
         spec_text,
-        reply_markup=get_spec_view_kb(),
-        parse_mode="Markdown"
+        reply_markup=get_spec_view_kb()
     )
     await state.set_state(KPStates.viewing_spec)
     await callback.answer()
@@ -639,8 +636,7 @@ async def process_spec_edit(message: types.Message, state: FSMContext):
             
             await message.answer(
                 f"✅ Пункт добавлен!\n\n" + format_spec_list(spec_items),
-                reply_markup=get_spec_view_kb(),
-                parse_mode="Markdown"
+                reply_markup=get_spec_view_kb()
             )
             await state.set_state(KPStates.viewing_spec)
             
@@ -660,8 +656,7 @@ async def process_spec_edit(message: types.Message, state: FSMContext):
                     
                     await message.answer(
                         f"✅ Удалено: {deleted_item}\n\n" + format_spec_list(spec_items),
-                        reply_markup=get_spec_view_kb(),
-                        parse_mode="Markdown"
+                        reply_markup=get_spec_view_kb()
                     )
                     await state.set_state(KPStates.viewing_spec)
                     
@@ -687,8 +682,7 @@ async def process_spec_edit(message: types.Message, state: FSMContext):
             
             await message.answer(
                 f"✅ Пункт изменён!\n\n" + format_spec_list(spec_items),
-                reply_markup=get_spec_view_kb(),
-                parse_mode="Markdown"
+                reply_markup=get_spec_view_kb()
             )
             await state.set_state(KPStates.viewing_spec)
     
